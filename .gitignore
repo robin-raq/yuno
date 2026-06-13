@@ -30,6 +30,9 @@ data/smoke/smoke_artifact.txt
 # Review / planning notes (never committed)
 review_docs/
 
+# Local-only tooling (never committed)
+.local/
+
 # macOS
 .DS_Store
 
