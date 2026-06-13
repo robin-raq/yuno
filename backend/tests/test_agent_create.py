@@ -26,6 +26,7 @@ async def test_create_agent_all_six_fields(client):
     assert data["model"] == "claude-sonnet-4-5"
     assert data["config"]["extensions"] == ["developer"]
     assert data["id"]  # UUID assigned
+    assert data["channels"] == []  # channels[] present; empty until S3 sets up connections
 
 
 @pytest.mark.asyncio
@@ -105,3 +106,29 @@ async def test_delete_agent(client):
 async def test_get_nonexistent_agent_returns_404(client):
     r = await client.get("/agents/does-not-exist")
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_channels_deferred_from_create_payload(client):
+    """channels in the create payload are accepted but not persisted to channel_connections.
+
+    channel_connections requires a channel_id (e.g. Telegram chat_id) which is absent
+    at agent creation time. The API response includes channels: [] drawn from the
+    channel_connections table; real rows are added in S3.
+    """
+    r = await client.post("/agents", json={
+        "name": "ChannelAgent",
+        "role": "Channel tester",
+        "system_prompt": "",
+        "model": "claude-sonnet-4-5",
+        "tool_access": [],
+        "channels": ["telegram"],
+    })
+    assert r.status_code == 201
+    data = r.json()
+    # channels: ["telegram"] in the payload names a type with no channel_id — not persisted
+    assert data["channels"] == []
+
+    r2 = await client.get(f"/agents/{data['id']}")
+    assert r2.status_code == 200
+    assert r2.json()["channels"] == []

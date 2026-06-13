@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select, insert, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import agents, agent_config, memory_entries, skills as skills_table
+from app.models import agents, agent_config, memory_entries, skills as skills_table, channel_connections
 
 
 async def list_agents(db: AsyncSession) -> list[dict]:
@@ -29,6 +29,7 @@ async def get_agent(db: AsyncSession, agent_id: str) -> dict | None:
     agent["config"] = await _get_config(db, agent_id)
     agent["memory"] = await _get_memory(db, agent_id)
     agent["skills"] = await _get_skills(db, agent_id)
+    agent["channels"] = await _get_channels(db, agent_id)
     return agent
 
 
@@ -48,6 +49,9 @@ async def create_agent(db: AsyncSession, data: dict) -> dict:
         extensions=json.dumps(data.get("tool_access", ["developer"])),
         requires_approval=0,
     ))
+    # data["channels"] (e.g. ["telegram"]) names channel types but carries no channel_id.
+    # channel_connections requires a channel_id (e.g. Telegram chat_id) which is only
+    # available after the channel is configured in S3. Persistence is deferred to S3.
     await db.commit()
     return await get_agent(db, agent_id)
 
@@ -96,6 +100,15 @@ async def _get_skills(db: AsyncSession, agent_id: str) -> list[dict]:
         s["steps"] = json.loads(s.get("steps", "[]"))
         result.append(s)
     return result
+
+
+async def _get_channels(db: AsyncSession, agent_id: str) -> list[str]:
+    rows = await db.execute(
+        select(channel_connections.c.channel_type).where(
+            channel_connections.c.agent_id == agent_id
+        )
+    )
+    return [r[0] for r in rows]
 
 
 def _sanitize_user_content(text: str) -> str:
