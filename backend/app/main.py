@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db
 from app.api.agents import router as agents_router
 from app.api.tasks import router as tasks_router
+from app.api.workflows import router as workflows_router
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ app.add_middleware(
 
 app.include_router(agents_router)
 app.include_router(tasks_router)
+app.include_router(workflows_router)
 
 
 @app.get("/health")
