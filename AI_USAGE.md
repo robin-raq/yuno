@@ -166,7 +166,7 @@ S1 does **not** complete AC-1 through AC-7. S1 delivers:
 - [x] Required S1 tests green: 16 passed, 1 skipped (live)
 - [x] AC-4 smoke gate passed (`make smoke-goose`, 3 tool_call events, artifact on disk)
 - [x] Manual browser demo evidence — stack verified 2026-06-13: `make dev` services healthy; agent list/create/delete via API; task submit returned `completed` with 3 `tool_call` events + `task_completed`; Vite proxy to `/agents` returned 200. Visual browser session not recorded in this closeout session (API + proxy path confirms browser shell wiring).
-- [ ] Commit — S1 baseline staged as single-responsibility commits (2026-06-13)
+- [x] Commit — 10 single-responsibility commits on `main` (2026-06-13)
 - [x] AI_USAGE.md updated (this entry)
 
 ---
