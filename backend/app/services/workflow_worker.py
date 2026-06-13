@@ -1,4 +1,4 @@
-"""Workflow worker — S2 Units 5–6.
+"""Workflow worker — S2 Units 5–7.
 
 Consumes one WorkflowDispatchItem at a time from the MessageBus queue,
 executes it through the Goose adapter, persists task and run lifecycle
@@ -6,13 +6,19 @@ events per BUILD_SPEC §12, and advances the workflow graph on success.
 
 Dispatch semantics: **at-most-once, in-memory**. `try_dequeue` removes the
 item before processing; retry, requeue, idempotency, stale-dispatch protection,
-multi-task run-status precedence, and loop cap are deferred.
+and multi-task run-status precedence are deferred. The feedback-loop cap (§9.3)
+and no_matching_edge failure (§9.5) are handled in workflow_graph (Unit 7).
 
 Two independent error domains:
 1. Adapter execution error (get_agent/context assembly/invoke/timeout) → task
    AND run marked failed via _record_failure.
-2. Graph traversal error (advance_after_task_completion) → task stays completed;
-   only the run is marked failed via _record_run_failed_post_completion.
+2. Graph traversal exception (advance_after_task_completion raises) → task stays
+   completed; only the run is marked failed via _record_run_failed_post_completion.
+
+Graph advancement returns one of four deliberate (non-exception) outcomes — see
+AdvanceResult: next_task (run stays running), completed / completed_forced (run
+completed via _record_run_completed), failed_no_match (run failed via
+_record_run_failed_no_match, task stays completed).
 
 Other design constraints:
 - Step 1 (mark running + task_started) commits first so the session is clean.
@@ -119,21 +125,28 @@ class WorkflowWorker:
         # Task succeeded. Commit task completion first (clean error domain boundary).
         await self._record_task_completed(db, item, result)
 
-        # Graph advancement is a separate error domain: if it fails, the task
-        # stays completed and only the run is marked failed.
+        # Graph advancement is a separate error domain: an unexpected exception
+        # (e.g. a matched edge points to a deleted node) leaves the task completed
+        # and fails only the run. The four deliberate outcomes below are normal
+        # control flow, NOT exceptions.
         try:
-            next_info = await advance_after_task_completion(
+            advance = await advance_after_task_completion(
                 db, item, result.output, self.bus
             )
         except Exception as exc:
             await self._record_run_failed_post_completion(db, item, exc)
             return
 
-        if next_info is None:
-            # Terminal node — no outgoing matched edges.
-            await self._record_run_completed(db, item, result)
-        # else: run stays 'running'; next task and message already committed by
-        # advance_after_task_completion; dispatch item already enqueued.
+        if advance.status == "next_task":
+            return  # run stays 'running'; next task + message committed, item enqueued
+        if advance.status == "completed":
+            await self._record_run_completed(db, item, result, forced=False)
+        elif advance.status == "completed_forced":
+            await self._record_run_completed(db, item, result, forced=True)
+        elif advance.status == "failed_no_match":
+            await self._record_run_failed_no_match(db, item)
+        else:  # pragma: no cover - defensive
+            raise ValueError(f"unknown advance status {advance.status!r}")
 
     # ── Step 1: mark running ─────────────────────────────────────────────────
 
@@ -205,16 +218,25 @@ class WorkflowWorker:
     # ── Step 4b: terminal node — run completed ────────────────────────────────
 
     async def _record_run_completed(
-        self, db: AsyncSession, item: WorkflowDispatchItem, result: TaskResult
+        self,
+        db: AsyncSession,
+        item: WorkflowDispatchItem,
+        result: TaskResult,
+        forced: bool = False,
     ) -> None:
-        """Mark run completed and emit workflow_completed. Called only when
-        advance_after_task_completion returns None (no matched outgoing edge)."""
+        """Mark run completed and emit workflow_completed. Called for a terminal
+        node (forced=False) or a capped feedback loop (forced=True, §9.3). When
+        forced, persists forced_complete=1 and carries it in the event. Any
+        feedback_loop_capped events that advance left uncommitted are committed
+        here atomically with the run update.
+        """
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(
             update(workflow_runs)
             .where(workflow_runs.c.id == item.run_id)
             .values(
                 status="completed",
+                forced_complete=1 if forced else 0,
                 completed_at=now,
                 total_tokens=result.tokens_total,
                 total_cost=result.estimated_cost,
@@ -224,7 +246,32 @@ class WorkflowWorker:
             db,
             run_id=item.run_id,
             event_type="workflow_completed",
-            data={"run_id": item.run_id, "forced_complete": False},
+            data={"run_id": item.run_id, "forced_complete": forced},
+        )
+        await db.commit()
+
+    # ── Step 4d: no matching edge on a non-end node (§9.5) ────────────────────
+
+    async def _record_run_failed_no_match(
+        self, db: AsyncSession, item: WorkflowDispatchItem
+    ) -> None:
+        """Fail the run when a non-end node had outgoing edges but none matched.
+
+        This is a deliberate control-flow outcome (not an exception), so the db
+        session is clean (the task was already committed and advance made no
+        uncommitted writes on this path). The completed task is NOT touched.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            update(workflow_runs)
+            .where(workflow_runs.c.id == item.run_id)
+            .values(status="failed", completed_at=now)
+        )
+        await self._emit(
+            db,
+            run_id=item.run_id,
+            event_type="workflow_failed",
+            data={"run_id": item.run_id, "reason": "no_matching_edge"},
         )
         await db.commit()
 
