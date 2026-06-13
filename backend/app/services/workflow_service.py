@@ -105,12 +105,19 @@ async def get_run(db: AsyncSession, run_id: str) -> dict:
     )
     tasks = [dict(t) for t in task_rows.mappings()]
 
+    # Order matches MessageBusService.list_messages: created_at + rowid tiebreak
+    # so same-second messages are deterministically ordered by insertion.
+    # Payload is decoded from JSON string to dict to match frontend expectations.
     msg_rows = await db.execute(
         select(agent_messages)
         .where(agent_messages.c.run_id == run_id)
-        .order_by(agent_messages.c.created_at)
+        .order_by(agent_messages.c.created_at, text("rowid"))
     )
-    messages = [dict(m) for m in msg_rows.mappings()]
+    messages = []
+    for m in msg_rows.mappings():
+        d = dict(m)
+        d["payload"] = json.loads(d["payload"])
+        messages.append(d)
 
     approval_rows = await db.execute(
         select(approval_requests).where(

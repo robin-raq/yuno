@@ -1,30 +1,26 @@
-"""Workflow worker — S2 Unit 5.
+"""Workflow worker — S2 Units 5–6.
 
-Consumes one WorkflowDispatchItem at a time from the MessageBus queue and
-executes it through the Goose adapter, persisting task and run lifecycle
-events per BUILD_SPEC §12.
+Consumes one WorkflowDispatchItem at a time from the MessageBus queue,
+executes it through the Goose adapter, persists task and run lifecycle
+events per BUILD_SPEC §12, and advances the workflow graph on success.
 
-Dispatch semantics (this phase): **at-most-once, in-memory**. `try_dequeue`
-removes the item before processing; there is no retry, requeue, idempotency,
-stale-dispatch protection, or multi-task run semantics yet — all deferred to a
-later unit. The worker is explicitly invoked: no background loop, no FastAPI
-startup hook.
+Dispatch semantics: **at-most-once, in-memory**. `try_dequeue` removes the
+item before processing; retry, requeue, idempotency, stale-dispatch protection,
+multi-task run-status precedence, and loop cap are deferred.
 
-Design constraints:
-- Step 1 (mark running + task_started) commits on the passed `db` session, so
-  the session is clean before the adapter call.
-- Context assembly (get_agent, preamble, TaskInput) runs INSIDE the
-  failure-handled region — a missing agent or context error fails the task and
-  run loudly, exactly like an adapter error (BUILD_SPEC §9 L503).
-- adapter.invoke is wrapped in asyncio.wait_for(timeout=timeout_seconds) per
-  BUILD_SPEC §9 L497 — a TimeoutError fails the task and run.
-- The failure path records task_failed/workflow_failed on a FRESH session in
-  its own try/except (mirroring S1 task_service "Finding #6"), so a poisoned
-  outer session cannot prevent the failure from being recorded. If even that
-  fails, it logs that the row may be stuck in 'running' and re-raises.
-- Streaming on_event uses AsyncSessionLocal() (one session per event) matching
-  the S1 pattern; only exercised in live tests.
-- Adapter injected via adapter_cls so unit tests supply a fake without patching.
+Two independent error domains:
+1. Adapter execution error (get_agent/context assembly/invoke/timeout) → task
+   AND run marked failed via _record_failure.
+2. Graph traversal error (advance_after_task_completion) → task stays completed;
+   only the run is marked failed via _record_run_failed_post_completion.
+
+Other design constraints:
+- Step 1 (mark running + task_started) commits first so the session is clean.
+- Context assembly runs INSIDE the adapter-error try-block (B1 fix).
+- adapter.invoke is wrapped in asyncio.wait_for per BUILD_SPEC §9 L497 (B2 fix).
+- Failure paths use a fresh AsyncSessionLocal session (S1 "Finding #6" parity).
+- Streaming on_event uses AsyncSessionLocal (one session per event).
+- Adapter injected via adapter_cls for unit-test injection.
 """
 import asyncio
 import json
@@ -42,6 +38,7 @@ from app.database import AsyncSessionLocal
 from app.models import agent_tasks, execution_events, workflow_runs
 from app.services.agent_service import assemble_context_preamble, get_agent
 from app.services.message_bus import MessageBusService, WorkflowDispatchItem
+from app.services.workflow_graph import advance_after_task_completion
 
 if TYPE_CHECKING:
     from app.adapters.base import AgentRuntimeAdapter
@@ -81,10 +78,11 @@ class WorkflowWorker:
     ) -> None:
         """Execute one workflow task end-to-end.
 
-        Step 1 marks running and commits. Everything after — context assembly,
-        the adapter call, and its timeout — is failure-handled: any exception
-        routes through _record_failure, so the task and run never stay stuck in
-        'running'.
+        Error domain 1 (adapter): context assembly + invoke + timeout. Any
+        exception → _record_failure (task AND run fail).
+
+        Error domain 2 (graph): advance_after_task_completion. Any exception →
+        _record_run_failed_post_completion (task stays completed; only run fails).
         """
         await self._mark_running(db, item)
 
@@ -118,7 +116,24 @@ class WorkflowWorker:
             await self._record_failure(db, item, exc)
             return
 
-        await self._record_success(db, item, result)
+        # Task succeeded. Commit task completion first (clean error domain boundary).
+        await self._record_task_completed(db, item, result)
+
+        # Graph advancement is a separate error domain: if it fails, the task
+        # stays completed and only the run is marked failed.
+        try:
+            next_info = await advance_after_task_completion(
+                db, item, result.output, self.bus
+            )
+        except Exception as exc:
+            await self._record_run_failed_post_completion(db, item, exc)
+            return
+
+        if next_info is None:
+            # Terminal node — no outgoing matched edges.
+            await self._record_run_completed(db, item, result)
+        # else: run stays 'running'; next task and message already committed by
+        # advance_after_task_completion; dispatch item already enqueued.
 
     # ── Step 1: mark running ─────────────────────────────────────────────────
 
@@ -157,11 +172,13 @@ class WorkflowWorker:
             timeout_seconds=cfg.get("timeout_seconds", 180),
         )
 
-    # ── Step 4a: success ─────────────────────────────────────────────────────
+    # ── Step 4a: task completed (commits before graph advancement) ────────────
 
-    async def _record_success(
+    async def _record_task_completed(
         self, db: AsyncSession, item: WorkflowDispatchItem, result: TaskResult
     ) -> None:
+        """Commit task completion. Called before advance_after_task_completion so
+        the task is definitively completed regardless of graph traversal outcome."""
         now = datetime.now(timezone.utc).isoformat()
         output_preview = (result.output or "")[:200]
         await db.execute(
@@ -183,6 +200,16 @@ class WorkflowWorker:
             task_id=item.task_id,
             agent_id=item.agent_id,
         )
+        await db.commit()
+
+    # ── Step 4b: terminal node — run completed ────────────────────────────────
+
+    async def _record_run_completed(
+        self, db: AsyncSession, item: WorkflowDispatchItem, result: TaskResult
+    ) -> None:
+        """Mark run completed and emit workflow_completed. Called only when
+        advance_after_task_completion returns None (no matched outgoing edge)."""
+        now = datetime.now(timezone.utc).isoformat()
         await db.execute(
             update(workflow_runs)
             .where(workflow_runs.c.id == item.run_id)
@@ -193,8 +220,6 @@ class WorkflowWorker:
                 total_cost=result.estimated_cost,
             )
         )
-        # Single-node workflow only: this task is the terminal node, so the run
-        # completes here. Multi-node edge traversal is deferred to a later unit.
         await self._emit(
             db,
             run_id=item.run_id,
@@ -202,6 +227,44 @@ class WorkflowWorker:
             data={"run_id": item.run_id, "forced_complete": False},
         )
         await db.commit()
+
+    # ── Step 4c: graph traversal failed after task completed ──────────────────
+
+    async def _record_run_failed_post_completion(
+        self, db: AsyncSession, item: WorkflowDispatchItem, exc: Exception
+    ) -> None:
+        """Mark run failed when graph traversal raises after the task completed.
+
+        Task status is NOT changed — it was committed as 'completed' already.
+        Only the run is marked failed. Uses a fresh session (same discipline as
+        _record_failure) so a poisoned outer session cannot block this write.
+        """
+        error = str(exc) or exc.__class__.__name__
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            async with AsyncSessionLocal() as fail_db:
+                await fail_db.execute(
+                    update(workflow_runs)
+                    .where(workflow_runs.c.id == item.run_id)
+                    .values(status="failed", completed_at=now)
+                )
+                await self._emit(
+                    fail_db,
+                    run_id=item.run_id,
+                    event_type="workflow_failed",
+                    data={"run_id": item.run_id, "reason": error},
+                )
+                await fail_db.commit()
+        except Exception:
+            log.exception(
+                "Failed to record graph failure for run %s — run may be stuck in 'running'",
+                item.run_id,
+            )
+            raise
 
     # ── Step 4b: failure (fresh session, guarded — S1 "Finding #6") ──────────
 
