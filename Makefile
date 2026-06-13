@@ -1,4 +1,4 @@
-.PHONY: setup dev smoke-goose test clean
+.PHONY: setup dev smoke-goose test clean phase-status commit-plan ai-usage-check
 
 GOOSE_PORT ?= 3284
 GOOSE_HOST ?= 127.0.0.1
@@ -60,6 +60,16 @@ test:
 
 test-live:
 	cd backend && python3 -m pytest tests/ -v -m live
+
+# ── Phase workflow helpers (read-only) ────────────────────────────────────────
+phase-status:
+	@python3 scripts/phase_status.py
+
+commit-plan:
+	@python3 scripts/commit_plan.py
+
+ai-usage-check:
+	@python3 scripts/ai_usage_check.py --phase "$(PHASE)"
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 clean:
