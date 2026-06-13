@@ -180,6 +180,8 @@ S1 does **not** complete AC-1 through AC-7. S1 delivers:
 - Claude Opus 4.8 via Claude Code (ce-work skill, Unit 3 workflow API spine; Unit 4 message bus)
 - Claude Sonnet 4.6 via Claude Code (ce-work skill, Unit 5 workflow worker/orchestrator)
 - Claude Sonnet 4.6 via Claude Code (ce-work skill, Unit 6 graph traversal and next-task dispatch)
+- Claude Opus 4.8 via Claude Code (ce-work skill, Unit 7 graph-execution semantics: loop cap, no_matching_edge, branch selection)
+- ce-correctness-reviewer (compound-engineering) — Unit 7 targeted correctness review (Approve to commit; 2 medium, 2 low, no blocking/high)
 
 #### Important Prompts
 - `/ce:work` with S2 pre-spine unit spec — scoped to parallel-safe units only (adapter hygiene + channel persistence proof) before the workflow spine begins
@@ -187,6 +189,7 @@ S1 does **not** complete AC-1 through AC-7. S1 delivers:
 - `/ce:work` Unit 4 spec — internal message-bus foundation only (persist A2A messages + in-process FIFO dispatch queue); explicit non-goals: no orchestrator, edge eval, feedback loop, worker execution, SSE, approval. Mandated red → green → refactor.
 - `/ce:work` Unit 5 spec — minimal workflow worker/orchestrator slice: dequeue one `WorkflowDispatchItem`, resolve task, execute via existing S1 adapter path, persist task/run lifecycle events. Non-goals: graph traversal, multi-agent fan-out, SSE, approval, Goose adapter changes. Mandated red → green → refactor.
 - `/ce:work` Unit 6 spec — graph traversal and next-task dispatch: evaluate outgoing edges from completed node, create next pending task, persist `task_output` handoff message, enqueue next `WorkflowDispatchItem`, keep run `running` if next task exists, complete run only at terminal node. Also fixes the Unit 4 M2 deferral: `get_run` message payload decoding and ordering. Mandated red → green → refactor.
+- `/ce:work` Unit 7 spec — graph-execution semantics: feedback-loop cap (§9.3), `no_matching_edge` failure on non-end nodes (§9.5), and correct conditional branch selection across all outgoing edges (§9.2). Authored after a sequencing analysis showed the seed templates (dev_pipeline, research_pipeline) contain conditional loop edges with `max_iterations=2` that Unit 6's uncapped first-match traversal would infinite-loop on. Explicit non-goals: SSE, replay, approval, true fan-out, retries, background loop. Mandated red → green → refactor.
 
 #### Decisions Made with AI Assistance
 - **Unit 1 — `_resolve_tool_name` extracted as named helper**: The inline `update.get("toolName", update.get("tool", "unknown"))` was correct but silent on degradation. Extracted to `_resolve_tool_name(update) -> str` with a `log.warning` when the name falls through to `"unknown"`. This converts a silent observability gap into a logged event.
@@ -215,6 +218,21 @@ S1 does **not** complete AC-1 through AC-7. S1 delivers:
 - **Unit 6 — Unit 4 M2 deferral resolved**: `workflow_service.get_run` now orders `agent_messages` by `created_at, rowid` (matching `MessageBusService.list_messages`) and decodes `payload` from JSON string to dict. No shared helper extracted (the two callers have slightly different projection needs); duplication is two lines.
 - **Unit 6 — `edge_matches` as a pure function in `workflow_graph.py`**: extracting the condition-matching logic as a standalone function makes it unit-testable without any DB or session dependency. `always` (case-insensitive) always matches; all other conditions are case-insensitive substring matches against `task_output`. `None` output only matches `always`.
 - **Unit 6 — fan-out, loop cap, no-matching-edge failure, stale dispatch deliberately deferred**: Unit 6 takes only the first matched edge (linear traversal). Fan-out (all matched edges), loop cap (`max_iterations`), `no_matching_edge` failure for non-end nodes, terminal-state guards, and stale dispatch are all deferred to later units per the spec.
+- **Unit 7 — loop-edge predicate is `condition != "always"` AND `to_node already executed in this run`**: §9.3 defines a loop edge purely structurally ("points to an already-executed node"), but in a 2-cycle (Coder⇄Reviewer) the forward "always" edge also points to an executed node once the cycle is entered — a naive structural check would cap the forward edge and miscount iterations. Adding the non-"always" guard isolates feedback (conditional) from forward progression (unconditional), landing exactly on the §9.3 example. A purely structural rule with real cycle/path analysis is deferred (needs arbitrary-graph support).
+- **Unit 7 — iteration counter = `count(tasks for to_node in run) − 1`**: the original pass is iteration 0; each loop-back adds one task for the looped-to node. Because the back edge's `to_node` (Coder) only gains tasks via the back edge, this counter is unaffected by the forward edge re-creating Reviewer tasks. `feedback_iteration_count` is also persisted on each loop-back task row for observability (the schema column exists for this).
+- **Unit 7 — `AdvanceResult` with four explicit outcomes** (`next_task` | `completed` | `completed_forced` | `failed_no_match`) replaces Unit 6's `dict | None`: the worker maps each to a distinct run-state transition. Critically, `failed_no_match` and `completed_forced` are deliberate control-flow outcomes, NOT exceptions — only a genuinely missing next node raises and routes through `_record_run_failed_post_completion` (preserving the Unit 6 two-error-domain discipline).
+- **Unit 7 — `completed_forced` overrides `no_matching_edge`**: per §9.3 a capped loop with nothing else matching completes with `forced_complete=true` (the sender's last output is accepted as final), even on a non-end node — it does NOT fail. `failed_no_match` only fires when a non-end node had edges, none matched, and no loop was capped.
+- **Unit 7 — loop dispatch uses `msg_type="feedback"`**: a loop-back handoff is semantically feedback, not `task_output` (schema §11 allows both). Forward dispatches keep `task_output` (Unit 6 parity). `feedback_sent` is emitted on loop dispatch (atomic with the next task + message via `bus.persist_message`); `feedback_loop_capped` is emitted on cap (committed atomically with the forced-complete run update by the worker).
+- **Unit 7 — true fan-out deferred (M1 from review)**: when >1 edge matches, only the first is dispatched (with a logged warning). `_get_edges_from` orders by `workflow_edges.id` so the choice is deterministic. Seed templates keep conditions mutually exclusive, so fan-out never fires; real simultaneous fan-out is deferred to a later unit.
+
+#### TDD Evidence (Unit 7)
+- **Failing tests written first:** `backend/tests/test_workflow_graph_semantics.py` (11 tests, `branch` 3-node fixture: Coder→Reviewer always; Reviewer→Coder REJECTED max_iter=2; Reviewer→Deployer APPROVED; a per-test closure-based `make_scripted_adapter`) authored before any Unit 7 implementation.
+- **Failure observed (RED):** `pytest tests/test_workflow_graph_semantics.py -q` → **8 failed, 2 passed**. The 8 failures included the loop-cap tests hitting the bounded `_drain` guard (`AssertionError: drain exceeded 20 steps — likely an uncapped loop`) — proving Unit 6's traversal infinite-loops on REJECTED — and the no_matching_edge test asserting `failed` where Unit 6 wrongly returns `completed`. The 2 passing were the APPROVED-branch cases (Unit 6's single-match traversal already routes APPROVED→Deployer correctly); they served as regression guards through the rewrite.
+- **Implementation done:** rewrote `app/services/workflow_graph.py` (`AdvanceResult`, loop-edge classification, `_resolve_cap`, `feedback_sent`/`feedback_loop_capped` emission, `no_matching_edge`/`completed_forced` outcomes); modified `workflow_worker.py` (outcome mapping in `process_dispatch_item`, `forced` param on `_record_run_completed`, new `_record_run_failed_no_match`).
+- **Targeted test passed (GREEN):** `pytest tests/test_workflow_graph_semantics.py -q` → **11 passed** (10 initial + 1 added post-review for `feedback_iteration_count` persistence).
+- **Full suite passed:** `pytest tests/ -q` → **82 passed, 1 skipped**.
+- **S1 regression:** `pytest tests/test_agent_create.py tests/test_adapter.py -q` → **20 passed, 1 skipped**.
+- **Unit 3/4/5/6 regression:** `pytest tests/test_workflow_api.py tests/test_message_bus.py tests/test_workflow_worker.py tests/test_workflow_graph_dispatch.py -q` → **51 passed**.
 
 #### TDD Evidence (Unit 6)
 - **Failing test written first:** `backend/tests/test_workflow_graph_dispatch.py` (20 tests, `two_node` + `one_node` fixtures, `FakeAdapter`/`FailingAdapter`) authored before `workflow_graph.py` existed.
@@ -271,6 +289,12 @@ cd backend && python3 -m pytest tests/ -q
 # Unit 6 full suite: pytest tests/ -q -> 71 passed, 1 skipped
 # Unit 6 S1 regression: pytest tests/test_agent_create.py tests/test_adapter.py -q -> 20 passed, 1 skipped
 # Unit 6 Unit3+4+5 regression: pytest tests/test_workflow_api.py tests/test_message_bus.py tests/test_workflow_worker.py -q -> 31 passed
+# Unit 7 RED:  pytest tests/test_workflow_graph_semantics.py -q -> 8 failed, 2 passed (uncapped-loop drain guard + no_matching_edge)
+# Unit 7 GREEN: pytest tests/test_workflow_graph_semantics.py -q -> 11 passed (incl post-review feedback_iteration_count test)
+# Unit 7 full suite: pytest tests/ -q -> 82 passed, 1 skipped
+# Unit 7 S1 regression: pytest tests/test_agent_create.py tests/test_adapter.py -q -> 20 passed, 1 skipped
+# Unit 7 Unit3+4+5+6 regression: pytest tests/test_workflow_api.py tests/test_message_bus.py tests/test_workflow_worker.py tests/test_workflow_graph_dispatch.py -q -> 51 passed
+# Unit 7 gate: make ai-usage-check PHASE=S2_UNIT_7 -> PASS
 ```
 
 #### Manual Review Performed
@@ -294,6 +318,13 @@ cd backend && python3 -m pytest tests/ -q
 - [x] Unit 6: confirmed Unit 3+4+5 behavior preserved — 31 passed on workflow_api + message_bus + workflow_worker regression
 - [x] Unit 6: confirmed no SSE/approval/fan-out/loop-cap/background-worker scope creep
 - [x] Unit 6: confirmed `get_run` message payload now decoded as dict, ordering deterministic (Unit 4 M2 deferral resolved)
+- [x] Unit 7: confirmed `AcpGooseAdapter` and ACP lifecycle untouched — no adapter file changed, smoke gate not required
+- [x] Unit 7: confirmed loop cap fires at exactly the §9.3 boundary (max_iter=2 → 2 loop-backs, 3rd capped); traced step-by-step and proven by `test_loop_cap_fires_at_boundary`
+- [x] Unit 7: confirmed the forward "always" edge is never misclassified as a loop (forward flow not capped) — `condition != "always"` guard, proven by branch-selection + cap tests
+- [x] Unit 7: confirmed `completed_forced`/`failed_no_match` are deliberate outcomes (not exceptions); the completed task is never rolled back (S5 asserts task stays completed on no_matching_edge)
+- [x] Unit 7: confirmed two-error-domain discipline preserved — only a missing next node raises; Unit 6 graph-failure tests (`test_graph_failure_*`) still green
+- [x] Unit 7: confirmed no SSE/approval/true-fan-out/retry/background-loop scope creep
+- [x] Unit 7: confirmed Unit 3/4/5/6 + S1 behavior preserved (51 + 20 regression green)
 
 #### Review Findings or Mistakes Caught
 
@@ -320,6 +351,15 @@ cd backend && python3 -m pytest tests/ -q
 **Unit 5 — TDD followed:** 13 tests written and run-to-failure (`ModuleNotFoundError`) before `workflow_worker.py` existed. One self-caught item during authoring: `test_start_run_does_not_auto_execute` asserted `status_code == 200` but the endpoint returns `201 Created` — corrected in the test file before the GREEN re-run (the implementation was not changed). No spec deviations.
 
 **Unit 6 — TDD followed:** 20 tests (two fixtures: `two_node` and `one_node`, with `FakeAdapter`/`FailingAdapter`) authored and confirmed-failing before `workflow_graph.py` existed. Failure mode was a collection error (`ModuleNotFoundError: No module named 'app.services.workflow_graph'`) — the most definitive RED signal, proving the test file imports the module that does not yet exist. No spec deviations. The Unit 4 M2 deferral (message payload shape + ordering in `get_run`) was resolved as part of this unit and is proven by `test_get_run_messages_decoded_as_dict`.
+
+**Unit 7 — TDD followed:** 11 tests authored and confirmed-failing (8 failed, 2 passed) before implementation. The RED signal was behavioral, not a collection error: the uncapped Unit 6 loop blew the bounded `_drain` step budget (`AssertionError: drain exceeded 20 steps`), and the no_matching_edge test asserted `failed` where Unit 6 returns `completed`. The 2 already-passing APPROVED-branch tests acted as regression guards through the rewrite. No spec deviations.
+
+**Unit 7 — targeted review run (ce-correctness-reviewer):** **Verdict: Approve to commit.** No blocking or high findings. The reviewer traced the loop-cap boundary step-by-step (confirmed cap at exactly max_iterations with no off-by-one), verified the forward-edge-never-capped guard, and confirmed transaction atomicity on every outcome (completed_forced, failed_no_match, next_task early-return, exception path). Findings resolved/deferred:
+- **M1 (medium, fan-out ordering) — partially resolved:** added deterministic `ORDER BY workflow_edges.id` to `_get_edges_from` so "take first eligible" is reproducible. True simultaneous fan-out (2+ matched non-loop edges) remains deferred (seed conditions are mutually exclusive, so it never fires).
+- **M2 (medium, `max_iterations=0`) — deferred:** `0` currently means "loop never taken" (caps on first match). Spec §9.3 does not define `0`; rather than guess intent, deferred with a recorded note. Seed data uses ≥1 / null.
+- **L1 (low, `iteration_count` semantics) — clarified in code:** added a comment documenting `iteration_count` = loop-backs already accepted (== cap at the boundary), not the skipped attempt. No behavior change; the value is asserted by `test_feedback_loop_capped_event_shape`.
+- **L2 (low, docstring grammar) — fixed** in `_record_run_completed`.
+- **Testing gap closed:** added `test_loop_task_records_feedback_iteration_count` asserting the `feedback_iteration_count` column is persisted (0,1,2) on loop-back task rows, not only in the event.
 
 #### Review Tier Decision (Unit 3)
 - **Recommended: targeted review** of `workflow_service.py` + `api/workflows.py` + `test_workflow_api.py` before commit. Unit 3 touches run creation and DB persistence (run + task + event), so it clears the "always-on correctness" bar but does not touch auth, external integrations, or the proven ACP adapter — full `ce-adversarial-reviewer` / `ce-code-review` is not yet warranted for this thin, additive, well-tested slice. Escalate to `ce-code-review` once the worker/orchestrator (next unit) introduces async execution and edge evaluation.
@@ -369,6 +409,14 @@ cd backend && python3 -m pytest tests/ -q
 #### `/ce-compound` Decision (Unit 6)
 - **Defer to S2 phase closeout.** Unit 6 adds the fourth nugget: the two-error-domain pattern (commit task before graph traversal; isolate run-failure write on its own fresh session) is a generalizable pattern for any multi-stage orchestration where step N must not corrupt step N−1's committed state. This belongs with Units 3–5 in one coherent `docs/solutions/workflow-issues/` entry capturing the full workflow-spine learning set. No `docs/solutions/` file created this unit.
 
+#### Review Tier Decision (Unit 7)
+- **Classification: high-risk-unit-closeout.** Unit 7 modifies workflow orchestration, run state transitions (new `completed_forced` and `failed_no_match` outcomes), loop control, and event emission on the just-stabilized graph engine. Same tier as Units 5–6.
+- **Minimum review: targeted correctness review required before commit.** Full `ce-adversarial-reviewer` not required — no ACP adapter, auth, external integration, or untrusted-input routing changed. No waiver.
+- **Review run:** `ce-correctness-reviewer`, read-only, scoped to `workflow_graph.py` + `workflow_worker.py` + `test_workflow_graph_semantics.py`. **Verdict: Approve to commit.** Findings recorded and resolved/deferred above (M1 partially resolved, M2/fan-out deferred, L1/L2 fixed, one test gap closed). Re-validated after fixes: targeted 11 passed, full suite 82 passed/1 skipped.
+
+#### `/ce-compound` Decision (Unit 7)
+- **Defer to S2 phase closeout.** Unit 7 adds the fifth nugget: the loop-edge classification heuristic (`condition != "always"` AND target-already-executed) and the per-target-node iteration counter that together make a 2-cycle feedback cap land on the spec boundary without polluting the count. This is a reusable pattern for bounded feedback loops in graph execution. Capture with the Units 3–6 nuggets as one coherent `docs/solutions/workflow-issues/` entry at S2 closeout. No `docs/solutions/` file created this unit.
+
 #### Review Follow-up (Unit 5) — Review run + findings resolved
 - **Review run:** targeted multi-persona correctness review (`/code-review`, report-only) with 5 reviewers — correctness, testing, maintainability, reliability, adversarial. **Verdict: Hold for fixes.** Three independent reviewers converged on the same stuck-in-running bug; both load-bearing claims (the BUILD_SPEC §9 L497 `asyncio.wait_for` mandate and the S1 `task_service` "Finding #6" failure-path pattern) were verified directly against source before acting.
 - **Root cause of all three blocking findings:** the worker mirrored S1's happy path but dropped S1's hard-won failure-path hardening. Fixes restore parity.
@@ -405,7 +453,12 @@ cd backend && python3 -m pytest tests/ -q
 - **Unit 6 — loop cap (`max_iterations`):** no cycle detection or feedback-loop cap. Deferred.
 - **Unit 6 — `no_matching_edge` non-terminal failure:** a non-end node with no matched outgoing edges silently terminates the run today (treated as a terminal node). The correct behavior (run fails with `no_matching_edge`) is deferred.
 - **Unit 6 — stale dispatch protection:** a duplicate `WorkflowDispatchItem` for an already-completed task would re-enter `process_dispatch_item`. No terminal-state guard blocks it today. Deferred.
-- **Units 7+**: SSE endpoint (`/events`), replay (`/runs/{id}/events`), approval endpoints, run view — not started.
+- **Unit 7 — loop cap, no_matching_edge, branch selection: DONE.** The two Unit 6 deferrals (loop cap, no_matching_edge failure) are resolved; conditional branch selection across all edges is correct. The seed templates (dev_pipeline, research_pipeline) now run safely without infinite loops.
+- **Unit 7 — true fan-out (M1) deferred:** when ≥2 edges match, only the first (by `workflow_edges.id` order) is dispatched, with a logged warning. Simultaneous multi-edge fan-out / parallel branch execution is deferred; seed conditions are mutually exclusive so it never fires today.
+- **Unit 7 — `max_iterations=0` semantics (M2) deferred:** `0` currently caps on the first match (loop never taken). §9.3 does not define `0`; intent confirmation + a boundary test deferred. Seed uses ≥1 / null.
+- **Unit 7 — purely structural loop detection deferred:** the loop-edge heuristic relies on `condition != "always"`. A graph with an "always" back edge (an unconditional loop) is not handled; real cycle/path analysis for arbitrary graphs is deferred (out of two-day scope; seed loops are all conditional).
+- **Unit 7 — stale dispatch / terminal-state guard still deferred:** unchanged from Unit 6.
+- **Units 8+**: Approval gate (§13/§14: pre-dispatch pause, `approval_required`/`approval_resolved`, approve/reject endpoints, `awaiting_approval` state), SSE endpoint (`/events`), replay (`/runs/{id}/events`), S2 Run View UI (§17.2) — not started.
 
 #### Architectural or Specification Amendments
 - No amendments to BUILD_SPEC.md or SYSTEM_DESIGN.md required.
