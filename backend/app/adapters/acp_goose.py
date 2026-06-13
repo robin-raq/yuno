@@ -108,6 +108,9 @@ class AcpGooseAdapter(AgentRuntimeAdapter):
 
                 session_payload, session_rpc_id = self._rpc("session/new", {
                     "cwd": os.getcwd(),
+                    # Goose builtins (e.g. "developer") are loaded at server startup via
+                    # --with-builtin. Per-session MCP server injection is deferred until
+                    # agent schemas carry explicit server configs (S4+).
                     "mcpServers": [],
                 })
                 async with aconnect_sse(
@@ -212,7 +215,7 @@ class AcpGooseAdapter(AgentRuntimeAdapter):
 
                     elif update_type in ("tool_call", "tool_call_update"):
                         tc = {
-                            "tool": update.get("toolName", update.get("tool", "unknown")),
+                            "tool": _resolve_tool_name(update),
                             "status": update.get("status", "called"),
                             "detail": update.get("parameters", update.get("detail", {})),
                         }
@@ -256,6 +259,14 @@ class AcpGooseAdapter(AgentRuntimeAdapter):
             )
         except Exception as exc:
             log.warning("session/close failed (non-fatal): %s", exc)
+
+
+def _resolve_tool_name(update: dict) -> str:
+    """Return the tool name from a tool_call update, warning when it cannot be determined."""
+    name = update.get("toolName", update.get("tool", "unknown"))
+    if name == "unknown":
+        log.warning("ACP tool_call missing toolName/tool field; keys=%s", list(update.keys()))
+    return name
 
 
 def _parse_event(data: str) -> dict | None:

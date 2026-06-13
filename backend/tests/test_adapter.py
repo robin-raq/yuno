@@ -10,7 +10,7 @@ import pytest
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.adapters.acp_goose import AcpGooseAdapter, _parse_event, _parse_session_update
+from app.adapters.acp_goose import AcpGooseAdapter, _parse_event, _parse_session_update, _resolve_tool_name
 from app.adapters.base import TaskInput, TaskResult
 
 
@@ -94,6 +94,19 @@ def test_frames_have_usage_data():
     result = frames["result"]
     assert isinstance(result["tokens_total"], int)
     assert result["tokens_total"] >= 0
+
+
+def test_resolve_tool_name_uses_toolName():
+    assert _resolve_tool_name({"toolName": "write_file", "tool": "fallback"}) == "write_file"
+
+
+def test_resolve_tool_name_falls_back_to_tool():
+    assert _resolve_tool_name({"tool": "read_file"}) == "read_file"
+
+
+def test_resolve_tool_name_unknown_when_absent():
+    assert _resolve_tool_name({}) == "unknown"
+    assert _resolve_tool_name({"status": "called"}) == "unknown"
 
 
 def test_task_input_fields():
