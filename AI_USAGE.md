@@ -172,25 +172,42 @@ S1 does **not** complete AC-1 through AC-7. S1 delivers:
 ---
 
 ### Story: S2 — Multi-agent workflow with persisted A2A messaging
-**Date:** 2026-06-13 (Units 1–2 only; Units 3+ not started)
+**Date:** 2026-06-13 (Units 1–3 implemented; Units 4+ not started)
 **Status:** [x] In Progress  [ ] Complete  [ ] Blocked
 
 #### AI Tools and Models Used
 - Claude Sonnet 4.6 via Claude Code (ce-work skill, Units 1–2 implementation)
+- Claude Opus 4.8 via Claude Code (ce-work skill, Unit 3 workflow API spine)
 
 #### Important Prompts
 - `/ce:work` with S2 pre-spine unit spec — scoped to parallel-safe units only (adapter hygiene + channel persistence proof) before the workflow spine begins
+- `/ce:work` Unit 3 spec — workflow API spine only (GET /workflows, POST /workflows/{id}/runs, GET /runs/{id}); explicit non-goals: no worker, orchestrator, message bus, SSE, approval, or task execution. Mandated red → green → refactor.
 
 #### Decisions Made with AI Assistance
 - **Unit 1 — `_resolve_tool_name` extracted as named helper**: The inline `update.get("toolName", update.get("tool", "unknown"))` was correct but silent on degradation. Extracted to `_resolve_tool_name(update) -> str` with a `log.warning` when the name falls through to `"unknown"`. This converts a silent observability gap into a logged event.
 - **Unit 1 — `mcpServers: []` comment**: Goose builtins (e.g. "developer") are loaded at server startup via `--with-builtin developer` (Makefile). The `mcpServers` array in `session/new` is for HTTP MCP servers — a different mechanism. Wiring `TaskInput.extensions` to `mcpServers` is not appropriate for S2 because extensions are startup-time and mcpServers are per-session HTTP configs. Deferred to S4+ when agent schemas carry explicit MCP server configs.
 - **Unit 2 — channel persistence deferred**: `AgentCreate.channels: list[str]` carries channel type names (e.g. `["telegram"]`) without `channel_id`. `channel_connections` requires `channel_id NOT NULL` — there is no valid value at agent creation time. Persisting an empty `channel_id` would be meaningless data. Decision: prove deferred with a comment in `create_agent` + a dedicated test (`test_channels_deferred_from_create_payload`) that asserts `channels: []` in the response.
 - **Unit 2 — `channels` added to `get_agent` response**: `_get_channels(db, agent_id)` queries `channel_connections.channel_type` and surfaces the result on `get_agent` and (via `return await get_agent(...)`) on `create_agent`. Additive response key, backward-compatible. Returns `[]` until S3 sets up real connections.
+- **Unit 3 — run status stays `pending` after POST**: BUILD_SPEC §9.1 says `start_workflow_run` creates the run row as `pending`; §10's `pending → running` transition is the worker dequeuing, which Unit 3 does not build. Setting `running` with no worker would show a permanently-stuck run. Chose `pending` (honest: created, awaiting worker).
+- **Unit 3 — run `started_at` set, task `started_at` null**: The run-level `started_at` marks when `start_workflow_run` was invoked (the run was started); the task-level `started_at` is set later when the worker dequeues (§10 AgentTask). This cleanly separates "run started" from "task started" and satisfies the contract field without overclaiming execution.
+- **Unit 3 — no enqueue / no message row**: §9.1 also "enqueues the start message", but no `asyncio.Queue`/worker exists yet and the spec forbids building one in this unit. Unit 3 stops after the first pending task + `workflow_started` event. No `agent_messages` row is created (messaging is a later unit).
+- **Unit 3 — structured errors via `HTTPException(detail={...})`**: `workflow_not_found` (404), `graph_validation_failed` (400), `run_not_found` (404) returned as `{"detail": {"error": ..., "message": ...}}`, giving stable machine-readable codes while staying within FastAPI conventions.
+- **Unit 3 — tasks ordered by SQLite `rowid`**: `agent_tasks` has no `created_at` column, so the run snapshot orders tasks by `rowid` (insertion = "created" order). Project is SQLite-only, so this is safe; trivial for the single Unit-3 task but correct as tasks accrue.
+
+#### TDD Evidence (Unit 3)
+- **Failing test written first:** `backend/tests/test_workflow_api.py` (6 tests + `seeded_workflows` fixture) authored before any implementation.
+- **Failure observed:** `pytest tests/test_workflow_api.py -q` → **6 failed** (endpoints absent: `KeyError: 'run_id'`, `TypeError: string indices` on the string error detail, empty list for GET /workflows). Fixture seeded cleanly, proving the shared-session seeding approach before code existed.
+- **Implementation done:** added `app/services/workflow_service.py` + `app/api/workflows.py`, registered the router in `app/main.py`.
+- **Targeted test passed:** `pytest tests/test_workflow_api.py -q` → **6 passed**.
+- **Full suite passed:** `pytest tests/ -q` → **26 passed, 1 skipped** (was 20 + 1).
 
 #### Validation Commands Run
 ```bash
 cd backend && python3 -m pytest tests/ -q
-# Result: 20 passed, 1 skipped (live) — 4 new tests added (3 Unit 1 + 1 Unit 2)
+# Units 1–2: 20 passed, 1 skipped (4 new tests)
+# Unit 3 RED:  pytest tests/test_workflow_api.py -q  -> 6 failed (endpoints absent)
+# Unit 3 GREEN: pytest tests/test_workflow_api.py -q -> 6 passed
+# Full suite:  26 passed, 1 skipped (live) — 6 new workflow tests
 ```
 
 #### Manual Review Performed
@@ -198,6 +215,9 @@ cd backend && python3 -m pytest tests/ -q
 - [x] Verified no secrets in staged files
 - [x] Checked BUILD_SPEC contracts — adapter lifecycle unchanged; agent CRUD response shape additive only
 - [x] Ran story tests and confirmed pass
+- [x] Unit 3: confirmed `AcpGooseAdapter` and ACP lifecycle untouched (no adapter file changed → smoke gate not required)
+- [x] Unit 3: confirmed S1 agent/task APIs unchanged; new router additive (`/workflows`, `/runs`)
+- [x] Unit 3: confirmed validation runs before any insert (invalid graph → zero rows, test-proven); inserts FK-ordered under a single commit
 
 #### Review Findings or Mistakes Caught
 
@@ -217,14 +237,33 @@ cd backend && python3 -m pytest tests/ -q
 5. Run the full test suite.
 6. Update `AI_USAGE.md` with the test-first evidence.
 
+**Unit 3 — TDD followed (forward rule honored):** Tests written and run-to-failure before implementation; no rework. No spec deviations found. No mistakes caught in review beyond the deliberate scope decisions documented above.
+
+#### Review Tier Decision (Unit 3)
+- **Recommended: targeted review** of `workflow_service.py` + `api/workflows.py` + `test_workflow_api.py` before commit. Unit 3 touches run creation and DB persistence (run + task + event), so it clears the "always-on correctness" bar but does not touch auth, external integrations, or the proven ACP adapter — full `ce-adversarial-reviewer` / `ce-code-review` is not yet warranted for this thin, additive, well-tested slice. Escalate to `ce-code-review` once the worker/orchestrator (next unit) introduces async execution and edge evaluation.
+
+#### Review Follow-up (Unit 3) — Review run + findings resolved
+- **Review run:** targeted correctness review (classified `high-risk-lite` per the automation pacing/review-gate design). **Verdict: approve with minor fixes.** No blocking/high findings.
+- **Resolved before commit:**
+  - **M2** — added `test_start_run_missing_start_agent_creates_no_rows`: a start node whose `agent_id` references no agent → 400 `graph_validation_failed`, zero `workflow_runs` and zero `agent_tasks` rows. Closes the previously-untested `_validate_graph` missing-agent branch.
+  - **L4** — strengthened `test_list_workflows_returns_seeded` to assert **both** `dev_pipeline` and `research_pipeline` by `template_key` (ids resolved from the response, never hardcoded).
+- **Deferred (recorded, non-blocking):** M1 (S1 string-detail vs S2 structured-detail error shapes — unify at a later consistency pass, not by touching S1 now); L1 (multi-start ordering), L2 (`rowid` SQLite coupling), L3 (no catch-all 500 handler in the workflows router), L5 (empty-input edge) — all revisit with the orchestrator unit.
+- **Validation after follow-up:** `pytest tests/test_workflow_api.py -q` → 7 passed; `pytest tests/ -q` → 27 passed, 1 skipped.
+
+#### `/ce-compound` Decision (Unit 3)
+- **Defer `/ce-compound` until the S2 workflow spine is further along.** Unit 3 produced one reusable nugget — the in-memory-SQLite shared-connection seeding pattern for API tests (seed through the same `db` session the client override yields) — but it is small and not yet battle-tested across units. Recommend running `/ce-compound` at S2 closeout (after the worker/orchestrator lands) to capture the workflow-spine learnings as one coherent entry rather than fragmenting them. No `docs/solutions/` file created this unit.
+
 #### Deferred or Blocked Work
 - **`mcpServers` wiring**: Deferred to S4+ (per-agent MCP server configs not in schema yet)
 - **Channel persistence**: Deferred to S3 (real channel_id comes from Telegram bot setup)
-- **Units 3+**: Workflow spine, orchestrator, worker, SSE endpoint, run view — not started; awaiting review gate per spec
+- **Unit 3 graph validation**: Only minimal blocking checks implemented (workflow exists, ≥1 start node, start node's agent exists). **Deferred** per §6: orphan-node detection (node connected to no edges), full edge-target validation, and multiple-start-node fan-out handling. Documented here as required by the spec.
+- **Unit 3 execution path**: enqueue of the start message, worker loop, orchestrator/edge evaluation, message bus, SSE endpoint (`/events`), replay (`/runs/{id}/events`), and approval endpoints — all deferred to later S2 units. Run stays `pending`; task stays `pending`.
+- **Units 4+**: Worker, orchestrator, A2A messaging, SSE, run view — not started; awaiting review gate per spec.
 
 #### Architectural or Specification Amendments
 - No amendments to BUILD_SPEC.md or SYSTEM_DESIGN.md required.
 - Confirmed: `channel_connections.channel_id NOT NULL` with no server default makes pre-S3 persistence impossible without schema change. Architecture is correct as-is.
+- Noted (no change required): BUILD_SPEC §9.1 ("creates row status=pending") vs §10 ("pending → running : start_workflow_run") is a minor internal tension; Unit 3 follows §9.1's explicit `pending` since the worker that performs the transition is out of scope.
 
 ---
 
