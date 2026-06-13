@@ -63,6 +63,13 @@ class InMemoryWorkflowQueue:
     async def dequeue(self) -> WorkflowDispatchItem:
         return await self._q.get()
 
+    def try_dequeue(self) -> "WorkflowDispatchItem | None":
+        """Non-blocking dequeue; returns None if the queue is empty."""
+        try:
+            return self._q.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+
     def size(self) -> int:
         return self._q.qsize()
 
@@ -126,6 +133,10 @@ class MessageBusService:
 
     async def dequeue(self) -> WorkflowDispatchItem:
         return await self.queue.dequeue()
+
+    def try_dequeue(self) -> "WorkflowDispatchItem | None":
+        """Non-blocking dequeue; returns None if the queue is empty."""
+        return self.queue.try_dequeue()
 
     def queue_size(self) -> int:
         return self.queue.size()
