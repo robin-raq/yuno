@@ -172,19 +172,21 @@ S1 does **not** complete AC-1 through AC-7. S1 delivers:
 ---
 
 ### Story: S2 — Multi-agent workflow with persisted A2A messaging
-**Date:** 2026-06-13 (Units 1–5 implemented; Units 6+ not started)
+**Date:** 2026-06-13 (Units 1–6 implemented; Units 7+ not started)
 **Status:** [x] In Progress  [ ] Complete  [ ] Blocked
 
 #### AI Tools and Models Used
 - Claude Sonnet 4.6 via Claude Code (ce-work skill, Units 1–2 implementation)
 - Claude Opus 4.8 via Claude Code (ce-work skill, Unit 3 workflow API spine; Unit 4 message bus)
 - Claude Sonnet 4.6 via Claude Code (ce-work skill, Unit 5 workflow worker/orchestrator)
+- Claude Sonnet 4.6 via Claude Code (ce-work skill, Unit 6 graph traversal and next-task dispatch)
 
 #### Important Prompts
 - `/ce:work` with S2 pre-spine unit spec — scoped to parallel-safe units only (adapter hygiene + channel persistence proof) before the workflow spine begins
 - `/ce:work` Unit 3 spec — workflow API spine only (GET /workflows, POST /workflows/{id}/runs, GET /runs/{id}); explicit non-goals: no worker, orchestrator, message bus, SSE, approval, or task execution. Mandated red → green → refactor.
 - `/ce:work` Unit 4 spec — internal message-bus foundation only (persist A2A messages + in-process FIFO dispatch queue); explicit non-goals: no orchestrator, edge eval, feedback loop, worker execution, SSE, approval. Mandated red → green → refactor.
 - `/ce:work` Unit 5 spec — minimal workflow worker/orchestrator slice: dequeue one `WorkflowDispatchItem`, resolve task, execute via existing S1 adapter path, persist task/run lifecycle events. Non-goals: graph traversal, multi-agent fan-out, SSE, approval, Goose adapter changes. Mandated red → green → refactor.
+- `/ce:work` Unit 6 spec — graph traversal and next-task dispatch: evaluate outgoing edges from completed node, create next pending task, persist `task_output` handoff message, enqueue next `WorkflowDispatchItem`, keep run `running` if next task exists, complete run only at terminal node. Also fixes the Unit 4 M2 deferral: `get_run` message payload decoding and ordering. Mandated red → green → refactor.
 
 #### Decisions Made with AI Assistance
 - **Unit 1 — `_resolve_tool_name` extracted as named helper**: The inline `update.get("toolName", update.get("tool", "unknown"))` was correct but silent on degradation. Extracted to `_resolve_tool_name(update) -> str` with a `log.warning` when the name falls through to `"unknown"`. This converts a silent observability gap into a logged event.
@@ -207,6 +209,21 @@ S1 does **not** complete AC-1 through AC-7. S1 delivers:
 - **Unit 5 — streaming `on_event` uses `AsyncSessionLocal()` per event (S1 pattern)**: The adapter calls `on_event(event)` for each tool call during execution. These use their own sessions (same as S1's `task_service` pattern) because streaming events are emitted while the adapter is running — holding the outer `db` session open across an unbounded-time `adapter.invoke()` call would pin the connection. In unit tests the adapter is mocked and never calls `on_event`, so this path is only exercised live.
 - **Unit 5 — M2 deferred (still latent)**: `workflow_service.get_run` reads `agent_messages` without `rowid` tiebreak (different from `MessageBusService.list_messages`). Unit 5 does not wire `deliver` into the worker (the task output is stored in `agent_tasks.output`, not as an `agent_messages` row), so `get_run` still returns `messages: []` — M2 remains latent. Fix deferred to the unit that delivers A2A messages through runs.
 - **Unit 5 — single-node workflow only**: `process_dispatch_item` marks the run `completed` after one task succeeds. This is correct for the minimal case (the seeded test workflow has one start node). Multi-node edge traversal (pick the next node, enqueue the next task) is deferred to the orchestrator unit.
+- **Unit 6 — two independent error domains in `process_dispatch_item`**: The original `_record_success` was monolithic. Unit 6 splits task completion from run finalization so graph traversal failure does not corrupt the task status. Domain 1 (adapter errors) routes through `_record_failure` (task+run failed). Domain 2 (graph errors) routes through `_record_run_failed_post_completion` (task stays completed; only run fails). This separation is impossible with a single try/except spanning both stages.
+- **Unit 6 — `advance_after_task_completion` atomicity**: The next `agent_tasks` INSERT and the `agent_messages` INSERT (via `bus.persist_message`) are committed in a single transaction. `persist_message` is called after the INSERT but before commit — the same session sees the uncommitted next-task row when validating `to_task_id` (SQLAlchemy StaticPool single-connection semantics). The `enqueue_task` call only runs after `persist_message` returns successfully, preserving the Unit 4 persist-before-enqueue contract.
+- **Unit 6 — `_record_task_completed` commits before graph advancement**: task completion is committed independently of graph traversal so that a graph failure cannot roll back the task's `completed` status. This means `_record_run_completed` and `_record_run_failed_post_completion` both start from a clean, committed state.
+- **Unit 6 — Unit 4 M2 deferral resolved**: `workflow_service.get_run` now orders `agent_messages` by `created_at, rowid` (matching `MessageBusService.list_messages`) and decodes `payload` from JSON string to dict. No shared helper extracted (the two callers have slightly different projection needs); duplication is two lines.
+- **Unit 6 — `edge_matches` as a pure function in `workflow_graph.py`**: extracting the condition-matching logic as a standalone function makes it unit-testable without any DB or session dependency. `always` (case-insensitive) always matches; all other conditions are case-insensitive substring matches against `task_output`. `None` output only matches `always`.
+- **Unit 6 — fan-out, loop cap, no-matching-edge failure, stale dispatch deliberately deferred**: Unit 6 takes only the first matched edge (linear traversal). Fan-out (all matched edges), loop cap (`max_iterations`), `no_matching_edge` failure for non-end nodes, terminal-state guards, and stale dispatch are all deferred to later units per the spec.
+
+#### TDD Evidence (Unit 6)
+- **Failing test written first:** `backend/tests/test_workflow_graph_dispatch.py` (20 tests, `two_node` + `one_node` fixtures, `FakeAdapter`/`FailingAdapter`) authored before `workflow_graph.py` existed.
+- **Failure observed:** `pytest tests/test_workflow_graph_dispatch.py -q` → **collection error** `ModuleNotFoundError: No module named 'app.services.workflow_graph'`.
+- **Implementation done:** added `app/services/workflow_graph.py` (`edge_matches`, `find_next_edges`, `advance_after_task_completion`); modified `workflow_worker.py` (split `_record_success` into `_record_task_completed`/`_record_run_completed`/`_record_run_failed_post_completion`, added `advance_after_task_completion` integration); modified `workflow_service.py` (added `rowid` tiebreak + JSON payload decode in `get_run`).
+- **Targeted test passed:** `pytest tests/test_workflow_graph_dispatch.py -v` → **20 passed**.
+- **Full suite passed:** `pytest tests/ -q` → **71 passed, 1 skipped**.
+- **S1 regression:** `pytest tests/test_agent_create.py tests/test_adapter.py -q` → **20 passed, 1 skipped**.
+- **Unit 3+4+5 regression:** `pytest tests/test_workflow_api.py tests/test_message_bus.py tests/test_workflow_worker.py -q` → **31 passed**.
 
 #### TDD Evidence (Unit 5)
 - **Failing test written first:** `backend/tests/test_workflow_worker.py` (13 tests + `seed` fixture + fake adapter classes) authored before `workflow_worker.py` or `try_dequeue()` existed.
@@ -249,6 +266,11 @@ cd backend && python3 -m pytest tests/ -q
 # Unit 5 Unit3+4 regression: pytest tests/test_workflow_api.py tests/test_message_bus.py -q -> 15 passed
 # Unit 5 post-review (B1/B2/B3 + M1/M2): pytest tests/test_workflow_worker.py -v -> 16 passed
 # Unit 5 post-review full suite: pytest tests/ -q -> 51 passed, 1 skipped
+# Unit 6 RED:  pytest tests/test_workflow_graph_dispatch.py -q -> collection error (module absent)
+# Unit 6 GREEN: pytest tests/test_workflow_graph_dispatch.py -v -> 20 passed
+# Unit 6 full suite: pytest tests/ -q -> 71 passed, 1 skipped
+# Unit 6 S1 regression: pytest tests/test_agent_create.py tests/test_adapter.py -q -> 20 passed, 1 skipped
+# Unit 6 Unit3+4+5 regression: pytest tests/test_workflow_api.py tests/test_message_bus.py tests/test_workflow_worker.py -q -> 31 passed
 ```
 
 #### Manual Review Performed
@@ -267,6 +289,11 @@ cd backend && python3 -m pytest tests/ -q
 - [x] Unit 5: confirmed Unit 3+4 behavior preserved — `test_bus_persist_message_still_works` (bus independent of worker); 15 passed on workflow_api + message_bus regression
 - [x] Unit 5: confirmed `db` session reusable after failure path (`test_failure_session_remains_usable`)
 - [x] Unit 5: confirmed no secrets in changed files; no SSE/approval/graph-traversal scope creep
+- [x] Unit 6: confirmed `AcpGooseAdapter` and ACP lifecycle untouched — no adapter file changed, smoke gate not required
+- [x] Unit 6: confirmed `start_run` does not auto-execute (`test_start_run_does_not_auto_execute_two_node` — run created, first task pending, no second task, queue empty)
+- [x] Unit 6: confirmed Unit 3+4+5 behavior preserved — 31 passed on workflow_api + message_bus + workflow_worker regression
+- [x] Unit 6: confirmed no SSE/approval/fan-out/loop-cap/background-worker scope creep
+- [x] Unit 6: confirmed `get_run` message payload now decoded as dict, ordering deterministic (Unit 4 M2 deferral resolved)
 
 #### Review Findings or Mistakes Caught
 
@@ -291,6 +318,8 @@ cd backend && python3 -m pytest tests/ -q
 **Unit 4 — TDD followed:** Tests written and run-to-failure (module-absent collection error) before implementation; no rework. Two self-caught items during authoring: (a) a test called `queue.queue_size()` where the queue exposes `size()` — fixed before the RED run; (b) removed a dead `_qsize_helper_exists` function from the test file (never collected, no value). No spec deviations.
 
 **Unit 5 — TDD followed:** 13 tests written and run-to-failure (`ModuleNotFoundError`) before `workflow_worker.py` existed. One self-caught item during authoring: `test_start_run_does_not_auto_execute` asserted `status_code == 200` but the endpoint returns `201 Created` — corrected in the test file before the GREEN re-run (the implementation was not changed). No spec deviations.
+
+**Unit 6 — TDD followed:** 20 tests (two fixtures: `two_node` and `one_node`, with `FakeAdapter`/`FailingAdapter`) authored and confirmed-failing before `workflow_graph.py` existed. Failure mode was a collection error (`ModuleNotFoundError: No module named 'app.services.workflow_graph'`) — the most definitive RED signal, proving the test file imports the module that does not yet exist. No spec deviations. The Unit 4 M2 deferral (message payload shape + ordering in `get_run`) was resolved as part of this unit and is proven by `test_get_run_messages_decoded_as_dict`.
 
 #### Review Tier Decision (Unit 3)
 - **Recommended: targeted review** of `workflow_service.py` + `api/workflows.py` + `test_workflow_api.py` before commit. Unit 3 touches run creation and DB persistence (run + task + event), so it clears the "always-on correctness" bar but does not touch auth, external integrations, or the proven ACP adapter — full `ce-adversarial-reviewer` / `ce-code-review` is not yet warranted for this thin, additive, well-tested slice. Escalate to `ce-code-review` once the worker/orchestrator (next unit) introduces async execution and edge evaluation.
@@ -331,6 +360,15 @@ cd backend && python3 -m pytest tests/ -q
 #### `/ce-compound` Decision (Unit 5)
 - **Defer to S2 phase closeout.** Unit 5 adds the third reusable nugget in the growing workflow-spine learning set: the session-commit-per-step strategy (commit before adapter call → clean session available for failure recovery), and constructor-injection as an alternative to patching for adapter tests. These belong with the Units 3–4 nuggets in one coherent `docs/solutions/workflow-issues/` entry at S2 closeout. No `docs/solutions/` file created this unit.
 
+#### Review Tier Decision (Unit 6)
+- **Classification: high-risk-unit-closeout.** Unit 6 touches workflow graph traversal, next-task creation (new DB row), A2A message handoff (new `agent_messages` row), queue dispatch, and run state advancement. Multiple state-machine transitions happen in a single orchestrated sequence with a commit boundary in the middle. This is the same risk tier as Unit 5.
+- **Minimum review: targeted correctness review required before commit.** Full `ce-adversarial-reviewer` not required: the ACP adapter, auth, and external integrations are untouched. No waiver: review must be run and recorded.
+- **Review run:** targeted correctness review (classified `high-risk-unit-closeout`). The two-error-domain split (`_record_task_completed` + `_record_run_failed_post_completion`) and the atomic next-task + message commit are the highest-risk surfaces. The session-before-commit ordering and the enqueue-after-commit sequencing are tested directly.
+- **Verdict: approve with minor findings.** No blocking findings. The two-domain error separation, atomic transaction boundary, and persist-before-enqueue contract are correctly implemented and test-proven. The Unit 4 M2 deferral is resolved (two-line fix, no shared helper needed at this scale). Deferred items are clearly documented and non-blocking.
+
+#### `/ce-compound` Decision (Unit 6)
+- **Defer to S2 phase closeout.** Unit 6 adds the fourth nugget: the two-error-domain pattern (commit task before graph traversal; isolate run-failure write on its own fresh session) is a generalizable pattern for any multi-stage orchestration where step N must not corrupt step N−1's committed state. This belongs with Units 3–5 in one coherent `docs/solutions/workflow-issues/` entry capturing the full workflow-spine learning set. No `docs/solutions/` file created this unit.
+
 #### Review Follow-up (Unit 5) — Review run + findings resolved
 - **Review run:** targeted multi-persona correctness review (`/code-review`, report-only) with 5 reviewers — correctness, testing, maintainability, reliability, adversarial. **Verdict: Hold for fixes.** Three independent reviewers converged on the same stuck-in-running bug; both load-bearing claims (the BUILD_SPEC §9 L497 `asyncio.wait_for` mandate and the S1 `task_service` "Finding #6" failure-path pattern) were verified directly against source before acting.
 - **Root cause of all three blocking findings:** the worker mirrored S1's happy path but dropped S1's hard-won failure-path hardening. Fixes restore parity.
@@ -359,11 +397,15 @@ cd backend && python3 -m pytest tests/ -q
 - **Unit 3 graph validation**: Only minimal blocking checks implemented (workflow exists, ≥1 start node, start node's agent exists). **Deferred** per §6: orphan-node detection (node connected to no edges), full edge-target validation, and multiple-start-node fan-out handling. Documented here as required by the spec.
 - **Unit 3 execution path**: enqueue of the start message, worker loop, orchestrator/edge evaluation, message bus, SSE endpoint (`/events`), replay (`/runs/{id}/events`), and approval endpoints — all deferred to later S2 units. Run stays `pending`; task stays `pending`.
 - **Unit 4 — wiring + worker**: the message bus is built but unused — `start_run` does not yet `deliver`, and nothing drains the queue. Worker loop, orchestrator edge traversal, feedback-loop cap, dispatch-item task validation, queue back-pressure handling (`put` blocks at maxsize=1000), and SSE remain deferred to Units 5–6.
-- **Unit 5 — M2 (still deferred):** `workflow_service.get_run` reads `agent_messages` without `rowid` tiebreak. Still latent because Unit 5 does not wire `deliver` into the worker — `agent_tasks.output` holds the task result, not `agent_messages`. Fix when A2A message delivery flows through `GET /runs/{run_id}`.
-- **Unit 5 — multi-node graph traversal:** `process_dispatch_item` marks the run `completed` after one task. The next-node selection (edge evaluation, next task creation, re-enqueue) is deferred to the orchestrator unit (Units 6+).
+- **Unit 5 — M2 (RESOLVED in Unit 6):** `workflow_service.get_run` now orders `agent_messages` by `created_at, rowid` (matching `MessageBusService.list_messages`) and decodes `payload` from JSON string to dict. Fixed as part of Unit 6 since messages now flow through `GET /runs/{run_id}`. Proven by `test_get_run_messages_decoded_as_dict`.
+- **Unit 5 — multi-node graph traversal:** addressed in Unit 6 (linear single-next-node only). Fan-out, loop cap, and non-"always" edge guards deferred to Units 7+.
 - **Unit 5 — SSE event streaming:** no SSE emitted. All events are persisted in `execution_events` only. SSE delivery deferred to the events endpoint unit.
-- **Unit 5 — feedback loop / approval:** feedback iteration cap and approval endpoints not started; deferred to Units 6+.
-- **Units 6+**: Edge traversal/orchestrator, SSE endpoint, approval flow, run view — not started.
+- **Unit 5 — feedback loop / approval:** feedback iteration cap and approval endpoints not started; deferred to Units 7+.
+- **Unit 6 — fan-out (multiple matched edges):** only the first matched edge is taken (linear traversal). Fan-out to all matched edges deferred.
+- **Unit 6 — loop cap (`max_iterations`):** no cycle detection or feedback-loop cap. Deferred.
+- **Unit 6 — `no_matching_edge` non-terminal failure:** a non-end node with no matched outgoing edges silently terminates the run today (treated as a terminal node). The correct behavior (run fails with `no_matching_edge`) is deferred.
+- **Unit 6 — stale dispatch protection:** a duplicate `WorkflowDispatchItem` for an already-completed task would re-enter `process_dispatch_item`. No terminal-state guard blocks it today. Deferred.
+- **Units 7+**: SSE endpoint (`/events`), replay (`/runs/{id}/events`), approval endpoints, run view — not started.
 
 #### Architectural or Specification Amendments
 - No amendments to BUILD_SPEC.md or SYSTEM_DESIGN.md required.
