@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Data and secrets
+.env
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/smoke/*.json
+data/smoke/smoke_artifact.txt
+
+# Logs
+*.log
+
+# Review / planning notes (never committed)
+review_docs/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
