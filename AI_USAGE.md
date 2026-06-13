@@ -172,10 +172,59 @@ S1 does **not** complete AC-1 through AC-7. S1 delivers:
 ---
 
 ### Story: S2 — Multi-agent workflow with persisted A2A messaging
-**Date:** _(fill in)_
-**Status:** [ ] In Progress  [ ] Complete  [ ] Blocked
+**Date:** 2026-06-13 (Units 1–2 only; Units 3+ not started)
+**Status:** [x] In Progress  [ ] Complete  [ ] Blocked
 
-> Fill in when S2 begins.
+#### AI Tools and Models Used
+- Claude Sonnet 4.6 via Claude Code (ce-work skill, Units 1–2 implementation)
+
+#### Important Prompts
+- `/ce:work` with S2 pre-spine unit spec — scoped to parallel-safe units only (adapter hygiene + channel persistence proof) before the workflow spine begins
+
+#### Decisions Made with AI Assistance
+- **Unit 1 — `_resolve_tool_name` extracted as named helper**: The inline `update.get("toolName", update.get("tool", "unknown"))` was correct but silent on degradation. Extracted to `_resolve_tool_name(update) -> str` with a `log.warning` when the name falls through to `"unknown"`. This converts a silent observability gap into a logged event.
+- **Unit 1 — `mcpServers: []` comment**: Goose builtins (e.g. "developer") are loaded at server startup via `--with-builtin developer` (Makefile). The `mcpServers` array in `session/new` is for HTTP MCP servers — a different mechanism. Wiring `TaskInput.extensions` to `mcpServers` is not appropriate for S2 because extensions are startup-time and mcpServers are per-session HTTP configs. Deferred to S4+ when agent schemas carry explicit MCP server configs.
+- **Unit 2 — channel persistence deferred**: `AgentCreate.channels: list[str]` carries channel type names (e.g. `["telegram"]`) without `channel_id`. `channel_connections` requires `channel_id NOT NULL` — there is no valid value at agent creation time. Persisting an empty `channel_id` would be meaningless data. Decision: prove deferred with a comment in `create_agent` + a dedicated test (`test_channels_deferred_from_create_payload`) that asserts `channels: []` in the response.
+- **Unit 2 — `channels` added to `get_agent` response**: `_get_channels(db, agent_id)` queries `channel_connections.channel_type` and surfaces the result on `get_agent` and (via `return await get_agent(...)`) on `create_agent`. Additive response key, backward-compatible. Returns `[]` until S3 sets up real connections.
+
+#### Validation Commands Run
+```bash
+cd backend && python3 -m pytest tests/ -q
+# Result: 20 passed, 1 skipped (live) — 4 new tests added (3 Unit 1 + 1 Unit 2)
+```
+
+#### Manual Review Performed
+- [x] Reviewed diff for scope creep — no workflow orchestration, SSE, or S3 work touched
+- [x] Verified no secrets in staged files
+- [x] Checked BUILD_SPEC contracts — adapter lifecycle unchanged; agent CRUD response shape additive only
+- [x] Ran story tests and confirmed pass
+
+#### Review Findings or Mistakes Caught
+
+**Process finding — TDD not followed for Unit 2:**
+- `_get_channels` and the `channels` key on the `get_agent` response were implemented before the failing test was written. This conflicts with the repo/global preference for test-driven or eval-first work on feature-bearing code.
+- The behavior is now covered by tests:
+  - `test_channels_deferred_from_create_payload`
+  - updated `test_create_agent_all_six_fields` (channels assertion added)
+- Current validation is green: 20 passed, 1 skipped.
+- No rework required for this small slice, but Units 3+ must follow red → green → refactor.
+
+**Forward rule — S2 Units 3+ must follow TDD:**
+1. Write or update the failing test first.
+2. Run the targeted test and show the failure.
+3. Implement the smallest change to make it pass.
+4. Run the targeted test again.
+5. Run the full test suite.
+6. Update `AI_USAGE.md` with the test-first evidence.
+
+#### Deferred or Blocked Work
+- **`mcpServers` wiring**: Deferred to S4+ (per-agent MCP server configs not in schema yet)
+- **Channel persistence**: Deferred to S3 (real channel_id comes from Telegram bot setup)
+- **Units 3+**: Workflow spine, orchestrator, worker, SSE endpoint, run view — not started; awaiting review gate per spec
+
+#### Architectural or Specification Amendments
+- No amendments to BUILD_SPEC.md or SYSTEM_DESIGN.md required.
+- Confirmed: `channel_connections.channel_id NOT NULL` with no server default makes pre-S3 persistence impossible without schema change. Architecture is correct as-is.
 
 ---
 
