@@ -572,6 +572,115 @@ make ai-usage-check PHASE=S2_REMITTANCE_UNIT_1
 
 ---
 
+### Story: S2-REM — Remittance Comparison workflow (Phase B: U3 Research helper)
+**Date:** 2026-06-14
+**Status:** [x] In Progress  [ ] Complete  [ ] Blocked
+
+> Same gate limitation as Phase A: `make ai-usage-check` has no phase name for the
+> remittance plan's units, so this entry is maintained manually. Plan source:
+> `docs/plans/2026-06-14-001-feat-remittance-comparison-workflow-plan.md` (U3).
+
+#### AI Tools and Models Used
+- Claude Sonnet 4.6 via Claude Code — read the U3 spec + existing contracts/fixtures,
+  then TDD implementation (failing test → helper → green). (Commits carry the
+  standard Claude co-author trailer.)
+
+#### Important Prompts and Key Decisions
+- Scoped to "U3 only — Research parsing / fixture-backed brief assembly"; explicit
+  do-not list (no U4 compliance engine, no adapter, no worker/graph changes, no
+  Telegram, no frontend); do-not-commit; test-first.
+- Decisions:
+  - `assemble_brief(text, *, memory_defaults, fixture_path, live_lookup=None)` —
+    pure, dependency-injected. `live_lookup=None` makes the fixture fallback the
+    default path so live rates are never fabricated (R3).
+  - Missing provider rate fields are returned as `missing_fields` gap labels
+    (e.g. `"western_union.rate_cop"`) via a `(quote, gaps)` builder — NOT raised.
+    This deliberately bypasses `ProviderQuote.from_dict`, which would `KeyError`
+    on the very field U3 must report (R4).
+  - Modality detection: digital keywords (bank/account/wise/digital) → `digital_send`;
+    otherwise `cash_send`. Cash quotes WU+MG; digital adds Wise (R2).
+  - Source split (KTD3): provider quotes + `sender_profile` from the fixture;
+    locality/currency from injected `memory_defaults`; amount + modality from text.
+
+#### TDD Evidence (U3)
+- RED:   `pytest tests/test_remittance_research.py -q` → `ModuleNotFoundError:
+         No module named 'app.domain.remittance.research'` (expected red).
+- GREEN: `pytest tests/test_remittance_research.py -q` → 6 passed.
+- 6 scenarios: cash parse (type/amount/WU+MG, no Wise), digital parse (Wise present),
+  fixture-fallback default, missing-field labeling, memory-default locality fill,
+  amount-without-`$` parse.
+- **Pre-commit cleanup pass** (see Review Findings): 3 additional tests added → 9 total.
+  New: `test_location_containing_bank_does_not_force_digital` (word-boundary regression),
+  `test_digital_includes_western_union_and_moneygram` (R2 provider completeness),
+  `test_missing_field_yields_none_quote_not_partial` (gap-is-None contract).
+
+#### Validation Commands Run
+```bash
+# Initial TDD green (6 tests)
+python3 -m pytest tests/test_remittance_research.py -q   # → 6 passed
+python3 -m pytest tests/test_remittance_*.py -q          # → 37 passed
+python3 -m pytest tests/ -q                              # → 119 passed, 1 skipped
+
+# After pre-commit cleanup pass (9 tests — word-boundary fix + 3 new coverage tests)
+python3 -m pytest tests/test_remittance_research.py -q   # → 9 passed
+python3 -m pytest tests/test_remittance_*.py -q          # → 40 passed
+python3 -m pytest tests/ -q                              # → 122 passed, 1 skipped
+```
+
+#### Manual Review Performed
+- [x] Fixture-first: `live_lookup` defaults to `None` → `data_source="fixture"`; no live invention.
+- [x] Missing fields returned as recoverable gaps, not exceptions.
+- [x] Deterministic: inputs are text + injected fixture + memory dict; no clock/random/network/DB.
+- [x] No Goose, no DB import; no worker/graph/runtime behavior changed.
+- [x] No secrets (fixtures are labeled demo data).
+- [x] No frontend files touched; scope is `research.py` + its test only.
+
+#### Review Findings or Mistakes Caught
+- TDD surfaced the `from_dict` KeyError trap before it was written: the missing-field
+  test forced the `(quote, gaps)` return shape instead of a crashing constructor.
+- **Keyword matching false-positive — FIXED in pre-commit cleanup pass:** `"bank" in text`
+  matched "Burbank", misclassifying `"send $500 cash to Burbank"` as `digital_send`.
+  Fixed by replacing the `_DIGITAL_KEYWORDS` tuple + `any(keyword in low ...)` loop with
+  `_DIGITAL_RE = re.compile(r"\b(?:digital|bank|wise|account)\b", re.IGNORECASE)` and
+  `_DIGITAL_RE.search(text)`. Regression test added:
+  `test_location_containing_bank_does_not_force_digital`.
+- **R2 provider coverage gap — FIXED in pre-commit cleanup pass:** the `test_digital_parse_includes_wise`
+  test only asserted `wise is not None`; a regression dropping WU+MG from `digital_send`
+  would have passed. Added `test_digital_includes_western_union_and_moneygram` asserting
+  all three providers are non-None on a digital request.
+- **Gap-is-None not pinned — FIXED in pre-commit cleanup pass:** the missing-field test
+  asserted the gap label was recorded but not that `brief.western_union is None`. A bug
+  constructing a partial quote while also recording the gap would have slipped through.
+  Added `test_missing_field_yields_none_quote_not_partial` asserting the gapped provider
+  is `None` in the output brief.
+
+#### Deferred or Blocked Work
+- **Amount parser takes first number in string** — `"2 payments of $500"` → `2.0`. The
+  demo corridor's inputs are single-number requests, so this does not affect correctness
+  today. A `$`-anchored heuristic or structured extractor is the right fix at 10x scale.
+- **Natural-language number parsing** — `"send five hundred dollars"` → `amount_usd=0.0`
+  (fixture fallback). Out of scope for the deterministic demo helper; LLM extractor at 10x.
+- **Whole-provider-block-absent branch test** — when an entire provider block (e.g. the
+  entire `"western_union"` key) is absent from the fixture, `_build_quote` returns
+  `(None, [name])` (a provider-level gap label). The fixture always supplies all three
+  providers, so this path is unreachable in current tests. Deferred — low risk for demo.
+- **`live_lookup` hook coverage** — the hook's path (`data_source="live"`, returned data
+  consumed) is untested. The hook is DI and currently unused by default; deferred.
+- **Structured extractor at 10x scale** — the deterministic keyword/regex parser is
+  the demo-tier implementation. A structured/LLM extractor with output normalization is
+  the production path; deferred beyond S3.
+- U4 Compliance engine and onward — not started.
+
+#### Review Tier Decision (U3)
+- Light self-review only. Rationale: small (~114 LOC), pure function, fully covered by
+  6 deterministic tests, no runtime/security surface. No multi-persona review warranted.
+
+#### `/ce-compound` Decision (U3)
+- Defer — accumulate with the broader remittance closeout; no standalone learning
+  warrants `docs/solutions/` yet.
+
+---
+
 ### Story: S3 — Live Telegram channel
 **Date:** _(fill in)_
 **Status:** [ ] In Progress  [ ] Complete  [ ] Blocked
