@@ -669,15 +669,180 @@ python3 -m pytest tests/ -q                              # → 122 passed, 1 ski
 - **Structured extractor at 10x scale** — the deterministic keyword/regex parser is
   the demo-tier implementation. A structured/LLM extractor with output normalization is
   the production path; deferred beyond S3.
-- U4 Compliance engine and onward — not started.
+- U4 Compliance engine: implemented (see entry below).
+- U5 ComplianceAdapter and onward — not started.
 
 #### Review Tier Decision (U3)
 - Light self-review only. Rationale: small (~114 LOC), pure function, fully covered by
-  6 deterministic tests, no runtime/security surface. No multi-persona review warranted.
+  9 deterministic tests (post-cleanup), no runtime/security surface. No multi-persona
+  review warranted.
 
 #### `/ce-compound` Decision (U3)
 - Defer — accumulate with the broader remittance closeout; no standalone learning
   warrants `docs/solutions/` yet.
+
+---
+
+### Story: S2-REM — Remittance Comparison workflow (Phase B: U4 Compliance rules engine)
+**Date:** 2026-06-14
+**Status:** [x] In Progress  [ ] Complete  [ ] Blocked
+
+> Same gate limitation as Phase A/B: `make ai-usage-check` has no phase name for the
+> remittance plan's units, so this entry is maintained manually. Plan source:
+> `docs/plans/2026-06-14-001-feat-remittance-comparison-workflow-plan.md` (U4).
+
+#### AI Tools and Models Used
+- Claude Sonnet 4.6 via Claude Code — read U4 spec + existing contracts/fixtures +
+  compliance_rules.json + compliance_cases.json, then TDD (failing test → engine → green).
+
+#### Important Prompts and Key Decisions
+- Scoped to "U4 only — compliance rules engine"; explicit do-not list (no U5 adapter,
+  no worker, no graph changes, no Telegram, no frontend); do-not-commit; test-first.
+- Decisions:
+  - `screen(brief, *, rules_path)` — pure function. Five rules evaluated in priority order;
+    first failure short-circuits with FLAGGED. Rules load from `rules_path`, never hardcoded.
+  - `screen_from_dict(raw_dict, *, rules_path)` — input-validation seam. The typed
+    `SenderProfile` cannot represent a missing `previously_flagged` field, but the raw
+    adapter payload can omit it. A missing flag is FLAGGED (fail-closed, KTD3). This seam
+    catches the gap before `TransferBrief.from_dict()` would silently KeyError or default.
+  - `format_output(result)` — adapter-ready text helper with sentinel on line 1 (KTD6).
+    Kept in `compliance.py` (not the adapter) so tests can verify sentinel and
+    collision-guard properties without importing U5, and U5 can import rather than re-implement.
+  - NEEDS_REVIEW not emitted: all five configured rules resolve to CLEARED or FLAGGED.
+    NEEDS_REVIEW is a representable status (types.py) whose trigger conditions are deferred
+    to U8 (seed graph). Documented in the module docstring.
+  - Corridor check: simple send/receive pair lookup. Fail-closed when the pair is absent
+    (FLAGGED), including when `supported_corridors` is empty. The providers list inside
+    each corridor entry is informational; the check does not restrict routing by provider.
+  - AML rule: cash send strictly GREATER THAN threshold → FLAGGED. At-the-threshold ($3000)
+    → CLEARED. **Threshold semantics: EXCLUSIVE (`>`)**, matching the plan's explicit
+    `amount_usd > aml_reporting_threshold_usd` operator. The `/ce:work` prompt phrased
+    this as "at or above" (`>=`), which conflicts with the plan. The plan's Approach
+    section is authoritative — it writes the actual Python operator. Real-world FinCEN CTR
+    uses at-or-above for $10,000; this demo engine intentionally uses the plan's exclusive
+    definition. Decision recorded after pre-commit threshold review (Option B chosen).
+  - ID rule: cash send GREATER THAN OR EQUAL TO threshold → note (never FLAGGED). Rule is
+    cash-only; digital sends do not trigger it.
+
+#### TDD Evidence (U4)
+- RED:   `pytest tests/test_remittance_compliance.py -q` → `ModuleNotFoundError:
+         No module named 'app.domain.remittance.compliance'` (expected red).
+- GREEN: `pytest tests/test_remittance_compliance.py -q` → 25 passed.
+- **Pre-commit threshold/sentinel cleanup pass** → 1 test comment strengthened + 1 new
+  test added (sentinel-contamination guardrail) → 26 tests total.
+- **Final targeted review cleanup pass** → 1 bug fix (sender_profile: null fail-closed
+  gap — see Review Findings), 1 AML-cash-only docstring clarified, 1 new test
+  (`test_null_sender_profile_fails_closed`) → 27 tests total.
+- 27 scenarios covering: standard CLEARED ($500), ID note present/absent, AML threshold
+  boundary (exclusive: $3000 → CLEARED, $3001 → FLAGGED), AML cash-only, restricted
+  country (sender + recipient), unsupported corridor, empty corridors (fail-closed),
+  previously-flagged sender, missing previously_flagged (fail-closed via screen_from_dict),
+  null sender_profile (fail-closed — fixed in final review), screen_from_dict passthrough
+  for valid input, sentinel line-1 (CLEARED and FLAGGED), collision-guard prose ("cleared"
+  lowercase), sentinel-contamination guard (exact "COMPLIANCE=CLEARED" token in FLAGGED
+  output, all 5 FLAGGED paths enumerated), collision guard via fixture case,
+  ComplianceResult round-trip, natural-language-status rejection, and unknown-status
+  rejection.
+
+#### Validation Commands Run
+```bash
+# TDD red (before implementation)
+python3 -m pytest tests/test_remittance_compliance.py -q
+#   → ModuleNotFoundError: No module named 'app.domain.remittance.compliance'
+
+# TDD green (after implementation)
+python3 -m pytest tests/test_remittance_compliance.py -q
+#   → 25 passed in 0.61s
+
+# Remittance-suite regression (initial)
+python3 -m pytest tests/test_remittance_*.py -q
+#   → 65 passed in 0.51s
+
+# Full suite regression (initial)
+python3 -m pytest tests/ -q
+#   → 147 passed, 1 skipped in 7.61s
+
+# After pre-commit threshold/sentinel cleanup (1 test comment + 1 new guardrail test)
+python3 -m pytest tests/test_remittance_compliance.py -q
+#   → 26 passed in 0.47s
+python3 -m pytest tests/test_remittance_*.py -q
+#   → 66 passed in 0.52s
+python3 -m pytest tests/ -q
+#   → 148 passed, 1 skipped in 7.70s
+
+# After final targeted review cleanup (null-profile fix + 1 new test + comment clarity)
+python3 -m pytest tests/test_remittance_compliance.py -q
+#   → 27 passed in 0.61s
+python3 -m pytest tests/test_remittance_*.py -q
+#   → 67 passed in 0.61s
+python3 -m pytest tests/ -q
+#   → 149 passed, 1 skipped in 8.65s
+```
+
+#### Manual Review Performed
+- [x] Confirmed no Goose, no DB, no network imports in compliance.py.
+- [x] Confirmed format_output always produces a KTD6 sentinel on line 1.
+- [x] Confirmed FLAGGED output can never contain "COMPLIANCE=CLEARED" (format_output
+      only emits the result's own sentinel, not a cross-sentinel string).
+- [x] Confirmed screen_from_dict fails closed for missing previously_flagged without
+      defaulting to False or raising.
+- [x] Confirmed AML rule is cash-only (digital $5000 → CLEARED in tests).
+- [x] Confirmed corridor check fails closed for empty supported_corridors list.
+- [x] No secrets in fixture files (demo data labeled _note).
+- [x] No frontend, worker, graph, adapter, or seed files touched.
+
+#### Review Findings or Mistakes Caught
+- None during TDD authoring — all 25 tests passed on the first implementation run.
+  The input-validation seam (screen_from_dict) was designed before writing to avoid the
+  subtle trap: calling TransferBrief.from_dict() on a dict with a missing previously_flagged
+  would raise a KeyError in SenderProfile.from_dict(), not return a ComplianceResult.
+  The seam intercepts this before construction.
+- **NB1 — `sender_profile: null` raised TypeError instead of failing closed — FIXED in
+  final targeted review:** `brief_dict.get("sender_profile", {})` returns the explicit
+  `None` value (not the `{}` default) when the key is present with a null value. Then
+  `"previously_flagged" not in None` raises `TypeError`. Fixed by changing the call to
+  `brief_dict.get("sender_profile") or {}`, which collapses both absent-key and null-value
+  into an empty dict. The empty dict lacks `previously_flagged`, so the seam returns
+  FLAGGED (fail-closed, KTD3). New test: `test_null_sender_profile_fails_closed`, which
+  also verifies the FLAGGED sentinel appears on line 1 of the formatted output.
+- **NB2 — AML cash-only test comment was misleading — FIXED:** the comment said "may or
+  may not clear depending on corridor/sender" while unconditionally asserting CLEARED.
+  Replaced with a precise docstring stating exactly what is proved: for the default brief
+  (USD→COP, non-flagged sender, no restricted countries), a digital $5000 is CLEARED
+  because the AML rule is cash-only and no other rule triggers on the default parameters.
+- **NB3 — `format_output` NEEDS_REVIEW body uses notes path (not issue) — DEFERRED:**
+  if NEEDS_REVIEW were ever emitted, its body would be `" ".join(result.notes)`, not
+  `result.issue`. This is not a current bug (NEEDS_REVIEW is never emitted by this
+  engine — documented in the module docstring). U5 should not assume format_output handles
+  NEEDS_REVIEW via issue. Deferred to U8 when NEEDS_REVIEW semantics are defined.
+
+#### Deferred or Blocked Work
+- **NEEDS_REVIEW trigger semantics** — representable in types.py but no rule in
+  compliance_rules.json triggers it. Deferred to U8 (seed graph definition).
+- **Corridor provider-level validation** — the current check finds the send/receive pair
+  but does not verify the specific providers in `corridor["providers"]` are the ones
+  actually quoted in the brief. This is fine for the demo (both WU and MG are always
+  present in the fixture); a stricter check would cross into Analyst territory. Deferred.
+- **Sender KYC and account_tier rules** — `kyc_verified` and `account_tier` are present
+  in SenderProfile but no rule currently uses them. The NEEDS_REVIEW fixture case references
+  "account tier and corridor combination" — this logic belongs with NEEDS_REVIEW semantics
+  and is deferred to U8.
+- **U5 ComplianceAdapter** — not started; U4 provides `format_output` for U5 to import.
+- **U6 worker adapter selection** — not started.
+
+#### Review Tier Decision (U4)
+- **Classification: high-risk-lite.** U4 controls routing and fail-closed behavior for
+  a compliance gate. Mistakes here mean a FLAGGED transfer reaching the Analyst (fail-open).
+  The sentinel test and collision-guard test directly guard against the KTD6 substring
+  collision. No adapter, no runtime, no DB — but the correctness stakes are high.
+- **Minimum review: targeted correctness review.** Run before proposing commit.
+  Full ce-adversarial-reviewer not required (pure function, no external integrations).
+  Review scope: `compliance.py` + `test_remittance_compliance.py`.
+
+#### `/ce-compound` Decision (U4)
+- Defer — accumulate with the broader remittance closeout. The fail-closed seam
+  (screen_from_dict) and format_output as a shared sentinel helper are reusable patterns,
+  but capturing them now would be premature. Document at S2-REM phase closeout.
 
 ---
 
