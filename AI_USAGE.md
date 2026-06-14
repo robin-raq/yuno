@@ -467,6 +467,111 @@ cd backend && python3 -m pytest tests/ -q
 
 ---
 
+### Story: S2-REM — Remittance Comparison workflow (Phase A: U1 fixtures + U2 types)
+**Date:** 2026-06-14
+**Status:** [x] In Progress  [ ] Complete  [ ] Blocked
+
+> **Gate limitation (recorded per instruction):** `make ai-usage-check` only
+> recognizes `S2` / `S2_UNIT_N` phase names tied to the original workflow-engine
+> units. There is no phase for the remittance plan's U1/U2
+> (`make ai-usage-check PHASE=S2_REMITTANCE_UNIT_1` → "Unrecognized PHASE").
+> This entry is therefore maintained **manually**. Plan source:
+> `docs/plans/2026-06-14-001-feat-remittance-comparison-workflow-plan.md`.
+
+#### AI Tools and Models Used
+- Claude Opus 4.8 (1M context) via Claude Code — planning (ce-plan), multi-persona
+  doc review (ce-doc-review), and this Phase A implementation (ce-work).
+- 7 reviewer subagents during the plan's doc-review pass (coherence, feasibility,
+  product-lens, security-lens, scope-guardian, adversarial, design-lens).
+
+#### Important Prompts
+- `/ce-work` scoped to "Phase A only — U1 fixtures + U2 types"; explicit do-not-implement
+  list (U3–U12, Telegram, graph/worker changes); do-not-commit; TDD where practical.
+- Clarifying question raised before coding: the prompt asked for a third compliance
+  route `COMPLIANCE=NEEDS_REVIEW` described as "in the plan", but the plan defines
+  Compliance as binary. User chose to **add** NEEDS_REVIEW as a third route.
+
+#### Decisions Made with AI Assistance
+- **NEEDS_REVIEW added** as a third `ComplianceStatus` + sentinel + fixture case
+  (user decision). Scope divergence from the plan — see Amendments.
+- **Sentinel routing tokens** (`COMPLIANCE=<STATUS>`, `ANALYST=<STATUS>`) carried
+  from plan KTD6 into the type constants — anchored `=` defeats the unanchored
+  substring matcher's fail-open collision.
+- **`cop_received` convention** fixed as `round((amount_usd - fee_usd) * rate_cop)`
+  and documented in the fixture `_note` so U7 scoring aligns with the data.
+- **Fail-closed `from_dict` validation** — status literals raise `ValueError` on
+  unknown values (the plan's "status literals reject invalid values" verification;
+  Python `Literal` is not enforced at runtime, so explicit checks were added).
+- **`compliance_cases.json` fixture added** (beyond the plan's two fixtures) to hold
+  example compliance outputs so the sentinel exactness + collision guard can be
+  asserted at the data layer without implementing U4/U5.
+- **`edge_matches` imported read-only** in the fixtures test (no change to
+  `workflow_graph.py`) so the collision guard runs through the REAL matcher.
+
+#### Validation Commands Run
+```bash
+# TDD red (before implementation)
+python3 -m pytest tests/test_remittance_types.py tests/test_remittance_fixtures.py -q
+#   → ModuleNotFoundError: No module named 'app.domain'   (expected red)
+
+# TDD green (after implementation)
+python3 -m pytest tests/test_remittance_types.py tests/test_remittance_fixtures.py -q
+#   → 31 passed in 0.54s
+
+# Full suite (regression)
+python3 -m pytest tests/ -q
+#   → 113 passed, 1 skipped in 8.53s
+
+# AI_USAGE gate (unsupported phase — limitation recorded above)
+make ai-usage-check PHASE=S2_REMITTANCE_UNIT_1
+#   → Unrecognized PHASE 'S2_REMITTANCE_UNIT_1'.
+```
+
+#### Manual Review Performed
+- [x] Reviewed diff for scope creep — Phase A only; no U3–U12, no Telegram, no
+      graph/worker changes. The one addition beyond the plan's file list
+      (`compliance_cases.json`) is justified above and serves the required tests.
+- [x] Verified no secrets — fixtures are fabricated demo data, labeled `_note`;
+      no tokens/keys/chat_ids.
+- [x] Checked BUILD_SPEC/plan contracts — TransferBrief/ComplianceResult/AnalystResult
+      field shapes match the plan's data contracts; sentinel convention matches KTD6.
+- [x] Ran the required tests and confirmed green (31 Phase A + full suite).
+
+#### Review Findings or Mistakes Caught
+- Collision-guard test proves the prior fail-open bug is closed: a `COMPLIANCE=FLAGGED`
+  output whose prose contains "cleared" returns `edge_matches("COMPLIANCE=CLEARED", out)
+  == False` through the real matcher.
+- Caught the plan-vs-prompt conflict (NEEDS_REVIEW) before writing code rather than
+  silently picking one interpretation.
+
+#### Deferred or Blocked Work
+- U3 Research, U4 Compliance engine, U5 ComplianceAdapter, U6 worker selection,
+  U7 scoring/analyst, U8 seed, U9 workflow tests, U10 docs, U11 canvas, U12 loop
+  threading — all out of Phase A scope.
+- **NEEDS_REVIEW semantics undefined:** what triggers it and where it routes is a
+  U4 (engine) + U8 (seed graph) decision. Phase A only makes it a representable
+  status/sentinel/fixture case.
+- **Plan amendment owed:** KTD6, U4, U5, U8 must be updated to define NEEDS_REVIEW
+  before those units are built (see Amendments).
+
+#### Architectural or Specification Amendments
+- **Scope divergence (NEEDS_REVIEW):** the committed plan defines Compliance as
+  binary (CLEARED/FLAGGED). Per execution-time user decision, a third route
+  NEEDS_REVIEW is now representable in types + fixtures. The plan body was NOT
+  edited during this ce-work run (routing semantics are a genuine U4/U8 decision,
+  not a guess). Before U4/U5/U8: update plan KTD6 (sentinel set), U4 (trigger rule),
+  U5 (adapter output), U8 (seed edge + route target), and record in DECISION_LOG.md.
+
+#### Final Completion Status
+- [x] Phase A units U1 + U2 implemented test-first
+- [x] Required tests green (31 Phase A; 113 passed / 1 skipped full suite)
+- [ ] Commit made — **pending user approval** (do-not-commit per prompt)
+- [x] AI_USAGE.md updated (this entry, manual)
+- ce-compound decision: **defer** — accumulate with the broader S2/remittance
+  closeout; no standalone learning warrants `docs/solutions/` yet.
+
+---
+
 ### Story: S3 — Live Telegram channel
 **Date:** _(fill in)_
 **Status:** [ ] In Progress  [ ] Complete  [ ] Blocked
