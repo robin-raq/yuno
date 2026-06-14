@@ -24,6 +24,10 @@ data/*.db-wal
 data/smoke/*.json
 data/smoke/smoke_artifact.txt
 
+# Generated remittance reports (keep the writable dir, ignore its output)
+reports/*
+!reports/.gitkeep
+
 # Logs
 *.log
 

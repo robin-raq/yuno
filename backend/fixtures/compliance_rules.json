@@ -1,0 +1,10 @@
+{
+  "_note": "DEMO compliance rules — illustrative only, NOT real OFAC/AML screening or legal advice. See README limitations. Five rules: (1) restricted_countries, (2) aml_reporting_threshold_usd, (3) id_required_threshold_usd, (4) supported_corridors, (5) flag_previously_flagged_senders (applied against the brief's sender_profile).",
+  "restricted_countries": [],
+  "aml_reporting_threshold_usd": 3000,
+  "id_required_threshold_usd": 500,
+  "supported_corridors": [
+    { "send": "USD", "receive": "COP", "providers": ["western_union", "moneygram"] }
+  ],
+  "flag_previously_flagged_senders": true
+}

@@ -1,0 +1,30 @@
+{
+  "_note": "Example Compliance node outputs demonstrating the KTD6 sentinel convention and all three compliance routes. Line 1 of each `output` is the reserved routing sentinel (COMPLIANCE=<STATUS>); human-readable prose follows on later lines. Used by Phase A tests to lock the sentinel contract and the fail-open collision guard. NEEDS_REVIEW is an execution-time addition beyond the original plan; its trigger semantics are a U4/U8 decision and are NOT defined here.",
+  "cases": [
+    {
+      "name": "standard_cleared",
+      "expected_status": "CLEARED",
+      "expected_sentinel": "COMPLIANCE=CLEARED",
+      "output": "COMPLIANCE=CLEARED\nColombia is not restricted by the configured rules. $500 is under the $3000 reporting threshold. Cash send of $500 or more requires valid government-issued ID at the send location. Western Union and MoneyGram both support the configured USD to COP corridor."
+    },
+    {
+      "name": "aml_flagged",
+      "expected_status": "FLAGGED",
+      "expected_sentinel": "COMPLIANCE=FLAGGED",
+      "output": "COMPLIANCE=FLAGGED\nCash send amount $3500 exceeds the configured $3000 AML reporting threshold. Sender must complete required reporting at the send location before proceeding."
+    },
+    {
+      "name": "collision_guard_flagged_with_cleared_prose",
+      "collision_guard": true,
+      "expected_status": "FLAGGED",
+      "expected_sentinel": "COMPLIANCE=FLAGGED",
+      "output": "COMPLIANCE=FLAGGED\nRecipient country is not cleared for the configured corridor, and the sender was not previously cleared for high-value transfers. Manual reporting is required before this transfer can proceed."
+    },
+    {
+      "name": "manual_review_needed",
+      "expected_status": "NEEDS_REVIEW",
+      "expected_sentinel": "COMPLIANCE=NEEDS_REVIEW",
+      "output": "COMPLIANCE=NEEDS_REVIEW\nTransfer requires manual compliance review before proceeding: the sender account tier and corridor combination is not auto-clearable under the configured demo rules."
+    }
+  ]
+}

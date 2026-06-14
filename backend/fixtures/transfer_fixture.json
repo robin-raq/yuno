@@ -1,0 +1,46 @@
+{
+  "_note": "DEMO DATA — fabricated for local demonstration only. NOT live Western Union / MoneyGram / Wise pricing; do not present as real rates. cop_received is computed as round((amount_usd - fee_usd) * rate_cop) — the recipient's net payout with the fee deducted from principal. U7 scoring must use the same convention.",
+  "transfer_type": "cash_send",
+  "amount_usd": 500,
+  "sender_city": "Austin, TX",
+  "sender_country": "US",
+  "recipient_country": "Colombia",
+  "recipient_city": "Bogotá",
+  "send_currency": "USD",
+  "receive_currency": "COP",
+  "data_source": "fixture",
+  "sender_profile": {
+    "previously_flagged": false,
+    "kyc_verified": true,
+    "account_tier": "standard"
+  },
+  "western_union": {
+    "fee_usd": 12.99,
+    "rate_cop": 4180,
+    "cop_received": 2035702,
+    "delivery_minutes": 10,
+    "nearest_location": {
+      "name": "H-E-B Money Services",
+      "distance": "1.2 miles",
+      "hours": "Mon-Sat 8am-9pm"
+    }
+  },
+  "moneygram": {
+    "fee_usd": 9.99,
+    "rate_cop": 4155,
+    "cop_received": 2035992,
+    "delivery_minutes": 15,
+    "nearest_location": {
+      "name": "Walmart Supercenter",
+      "distance": "3.8 miles",
+      "hours": "Daily 7am-11pm"
+    }
+  },
+  "wise": {
+    "fee_usd": 7.45,
+    "rate_cop": 4205,
+    "cop_received": 2071273,
+    "delivery_minutes": 1440,
+    "nearest_location": null
+  }
+}

@@ -1,0 +1,2 @@
+# Writable output dir for the remittance Analyst's transfer_comparison.md.
+# Contents are gitignored (see .gitignore: reports/*); this file keeps the dir tracked.
