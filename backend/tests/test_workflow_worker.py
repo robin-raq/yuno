@@ -16,7 +16,7 @@ Coverage:
   W9  failure path: task=failed, run=failed
   W10 failure path: task_failed + workflow_failed events emitted
   W11 failure path: db session remains usable after failure
-  W12 Unit 3 compat: start_run does NOT auto-execute (queue stays empty)
+  W12 Unit 9: start_run enqueues first task (worker loop disabled in tests)
   W13 Unit 4 compat: MessageBusService tests are unaffected (bus unused here)
   W14 Compliance agent routes through scripted ComplianceAdapter (U6)
   W15 Analyst agent routes through scripted AnalystAdapter
@@ -414,24 +414,26 @@ async def test_failure_session_remains_usable(db, seed):
     assert row["status"] == "failed"
 
 
-# ── W12: Unit 3 compat — start_run does NOT auto-execute ─────────────────────
+# ── W12: Unit 9 — start_run enqueues but does not execute without worker ─────
 
 @pytest.mark.asyncio
-async def test_start_run_does_not_auto_execute(client, db, seed):
-    """POST /workflows/{id}/runs must not drain the queue or execute tasks.
-    The queue stays empty; the task stays pending after the HTTP call."""
+async def test_start_run_enqueues_without_executing(client, db, seed):
+    """POST /workflows/{id}/runs enqueues the first dispatch item. With the
+    worker loop disabled in tests, the task stays pending."""
+    from app.services.message_bus import get_message_bus
+
     resp = await client.post(
         f"/workflows/{seed['workflow_id']}/runs",
         json={"input": "Hello from compat test"},
     )
     assert resp.status_code == 201
 
-    # The new run's first task must be pending, not completed/running
     new_run_id = resp.json()["run_id"]
     task_row = (await db.execute(
         select(agent_tasks.c.status).where(agent_tasks.c.run_id == new_run_id)
     )).mappings().one()
     assert task_row["status"] == "pending"
+    assert get_message_bus().queue_size() == 1
 
 
 # ── W13: Unit 4 compat — bus persists messages independently ──────────────────

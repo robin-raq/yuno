@@ -1,9 +1,9 @@
-"""Workflow API spine (S2 Unit 3).
+"""Workflow API spine (S2 Unit 3 + Unit 9 enqueue).
 
 Lists workflows, starts a run (validate graph → create run + first pending task
-→ persist workflow_started), and returns a run snapshot. Execution — the worker,
-orchestrator, message bus, and edge evaluation — is a later unit; Unit 3 stops
-after the first pending task is created. Goose is never invoked here.
+→ persist workflow_started → enqueue first dispatch item), and returns a run
+snapshot. The background worker (S2 Unit 9) drains the queue; Goose is never
+invoked in this module.
 """
 import json
 import uuid
@@ -14,9 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     agents, workflows, workflow_nodes, workflow_runs, agent_tasks,
-    agent_messages, approval_requests, execution_events,
+    agent_messages, approval_requests,
 )
 from app.services.event_service import get_event_service
+from app.services.message_bus import WorkflowDispatchItem, get_message_bus
 
 
 class WorkflowNotFound(Exception):
@@ -62,23 +63,33 @@ async def start_run(db: AsyncSession, workflow_id: str, initial_input: str) -> d
 
     # First task: the start node, awaiting a worker. Input falls back to the
     # node's own prompt when the caller supplies none.
+    task_id = str(uuid.uuid4())
+    task_input = initial_input or start_node["task_prompt"]
     await db.execute(insert(agent_tasks).values(
-        id=str(uuid.uuid4()),
+        id=task_id,
         run_id=run_id,
         node_id=start_node["id"],
         agent_id=start_node["agent_id"],
         source="workflow",
         status="pending",
-        input=initial_input or start_node["task_prompt"],
+        input=task_input,
     ))
 
-    await db.execute(insert(execution_events).values(
-        id=str(uuid.uuid4()),
+    await get_event_service().emit(
+        db,
         run_id=run_id,
         event_type="workflow_started",
-        data=json.dumps({"run_id": run_id, "workflow_id": workflow_id}),
-    ))
+        data={"run_id": run_id, "workflow_id": workflow_id},
+    )
     await db.commit()
+
+    await get_message_bus().enqueue_task(WorkflowDispatchItem(
+        run_id=run_id,
+        task_id=task_id,
+        agent_id=start_node["agent_id"],
+        node_id=start_node["id"],
+        input=task_input,
+    ))
 
     return {
         "run_id": run_id,

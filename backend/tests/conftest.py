@@ -24,18 +24,29 @@ def pytest_collection_modifyitems(config, items):
 async def db():
     from app.database import engine, AsyncSessionLocal
     from app.models import metadata
+    from app.services.event_service import reset_event_service
+    from app.services.message_bus import reset_message_bus
+    reset_event_service()
+    reset_message_bus()
     # Finding #14: drop + recreate all tables for each test so no state leaks between tests.
     async with engine.begin() as conn:
         await conn.run_sync(metadata.drop_all)
         await conn.run_sync(metadata.create_all)
     async with AsyncSessionLocal() as session:
         yield session
+    reset_event_service()
+    reset_message_bus()
 
 
 @pytest_asyncio.fixture
 async def client(db):
     from app.main import app
     from app.database import get_db
+    from app.services.event_service import reset_event_service
+    from app.services.message_bus import reset_message_bus
+
+    reset_event_service()
+    reset_message_bus()
 
     async def override_db():
         yield db
@@ -45,3 +56,5 @@ async def client(db):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
+    reset_event_service()
+    reset_message_bus()

@@ -13,14 +13,7 @@ import pytest_asyncio
 from sqlalchemy import insert, select
 
 from app.models import agents, agent_config, execution_events, workflow_runs, workflows
-from app.services.event_service import EventService, get_event_service, reset_event_service
-
-
-@pytest.fixture(autouse=True)
-def _fresh_event_bus():
-    reset_event_service()
-    yield
-    reset_event_service()
+from app.services.event_service import EventService, get_event_service
 
 
 @pytest_asyncio.fixture

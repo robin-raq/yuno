@@ -45,6 +45,7 @@ from app.adapters.compliance_adapter import ComplianceAdapter
 from app.database import AsyncSessionLocal
 from app.models import agent_tasks, execution_events, workflow_runs
 from app.services.agent_service import assemble_context_preamble, get_agent
+from app.services.event_service import get_event_service
 from app.services.message_bus import MessageBusService, WorkflowDispatchItem
 from app.services.workflow_graph import advance_after_task_completion
 
@@ -396,15 +397,13 @@ class WorkflowWorker:
         data: dict,
         task_id: str | None = None,
         agent_id: str | None = None,
-    ) -> None:
-        """Insert one execution_events row. Run-level events omit task_id/agent_id."""
-        await session.execute(
-            insert(execution_events).values(
-                id=str(uuid.uuid4()),
-                run_id=run_id,
-                task_id=task_id,
-                agent_id=agent_id,
-                event_type=event_type,
-                data=json.dumps(data),
-            )
+    ) -> dict:
+        """Persist one execution_events row and fan out to SSE subscribers."""
+        return await get_event_service().emit(
+            session,
+            run_id=run_id,
+            task_id=task_id,
+            agent_id=agent_id,
+            event_type=event_type,
+            data=data,
         )

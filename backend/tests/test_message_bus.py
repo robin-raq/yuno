@@ -226,17 +226,21 @@ async def test_deliver_unknown_from_task_raises(db, bus_seed):
 # ── 5. Unit 3 compatibility (no execution, no Goose) ────────────────────────
 
 @pytest.mark.asyncio
-async def test_start_run_still_pending_with_no_dispatch(db, bus_seed):
-    """Unit 3 start path is unchanged: a run start creates a pending task + the
-    workflow_started event, and Unit 4 does not enqueue or execute it."""
+async def test_start_run_enqueues_first_task(db, bus_seed):
+    """Unit 9: start_run commits the run then enqueues the first dispatch item."""
     from app.services import workflow_service
+    from app.services.message_bus import get_message_bus
 
-    queue = InMemoryWorkflowQueue()
+    bus = get_message_bus()
     snapshot = await workflow_service.start_run(db, bus_seed["workflow_id"], "build")
 
     assert snapshot["status"] == "pending"
     run = await workflow_service.get_run(db, snapshot["run_id"])
     assert len(run["tasks"]) == 1
     assert run["tasks"][0]["status"] == "pending"
-    assert run["tasks"][0]["output"] is None      # Goose never invoked
-    assert queue.size() == 0                       # nothing dispatched by Unit 4
+    assert run["tasks"][0]["output"] is None
+    assert bus.queue_size() == 1
+    item = bus.try_dequeue()
+    assert item is not None
+    assert item.run_id == snapshot["run_id"]
+    assert item.input == "build"

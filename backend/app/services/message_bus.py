@@ -168,3 +168,19 @@ class MessageBusService:
         row = await db.execute(select(agent_tasks.c.id).where(agent_tasks.c.id == task_id))
         if row.first() is None:
             raise UnknownTask(task_id)
+
+
+_message_bus: MessageBusService | None = None
+
+
+def get_message_bus() -> MessageBusService:
+    global _message_bus
+    if _message_bus is None:
+        _message_bus = MessageBusService()
+    return _message_bus
+
+
+def reset_message_bus() -> None:
+    """Test helper — fresh in-memory queue between tests."""
+    global _message_bus
+    _message_bus = MessageBusService()
