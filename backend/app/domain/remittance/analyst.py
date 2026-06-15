@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from app.domain.remittance.compliance import parse_adapter_output
+from app.domain.remittance.json_extract import extract_json_object
 from app.domain.remittance.scoring import pick_winner, provider_label, providers_for_brief, score_providers
 from app.domain.remittance.types import AnalystInput, AnalystResult, ProviderQuote, TransferBrief
 
@@ -195,6 +196,6 @@ def analyze(
 
 def compose_analyst_task_input(brief_json: str, compliance_output: str) -> str:
     """Build ``AnalystInput`` JSON for the scripted Analyst node after Compliance clears."""
-    brief = TransferBrief.from_dict(json.loads(brief_json))
+    brief = TransferBrief.from_dict(extract_json_object(brief_json))
     compliance = parse_adapter_output(compliance_output)
     return json.dumps(AnalystInput(brief=brief, compliance=compliance).to_dict())

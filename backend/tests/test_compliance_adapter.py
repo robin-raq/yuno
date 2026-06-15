@@ -140,6 +140,24 @@ async def test_invoke_malformed_payload_fails_closed(adapter):
 
 
 @pytest.mark.asyncio
+async def test_invoke_fenced_valid_json_cleared(adapter):
+    """Goose-style fenced JSON brief → COMPLIANCE=CLEARED."""
+    brief = _valid_brief()
+    wrapped = f"Here is the brief:\n```json\n{json.dumps(brief)}\n```"
+    result = await adapter.invoke(_task(wrapped), _no_event)
+    assert result.output.splitlines()[0] == "COMPLIANCE=CLEARED"
+
+
+@pytest.mark.asyncio
+async def test_invoke_prose_wrapped_valid_json_cleared(adapter):
+    """Prose before/after valid JSON brief → COMPLIANCE=CLEARED."""
+    brief = _valid_brief()
+    wrapped = f"I gathered quotes.\n{json.dumps(brief)}\nEnd of brief."
+    result = await adapter.invoke(_task(wrapped), _no_event)
+    assert result.output.splitlines()[0] == "COMPLIANCE=CLEARED"
+
+
+@pytest.mark.asyncio
 async def test_invoke_empty_payload_fails_closed(adapter):
     """Empty string task_content → COMPLIANCE=FLAGGED, no exception raised."""
     result = await adapter.invoke(_task(""), _no_event)

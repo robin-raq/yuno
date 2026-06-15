@@ -5,8 +5,8 @@ Pure Python — no Goose, no DB, no network. Parses the Research brief JSON from
 whose first output line is a KTD6 sentinel (``COMPLIANCE=CLEARED`` /
 ``COMPLIANCE=FLAGGED`` / ``COMPLIANCE=NEEDS_REVIEW``).
 
-Fail-closed on any parse failure: a ``json.JSONDecodeError`` returns
-``COMPLIANCE=FLAGGED`` rather than raising. A raise would route through the
+Fail-closed on any parse failure: :class:`JsonExtractError` or validation errors
+return ``COMPLIANCE=FLAGGED`` rather than raising. A raise would route through the
 worker's ``task_failed``/``workflow_failed`` path and leave the run ``failed``
 with the issue suppressed; the graph needs a visible FLAGGED terminal output
 so it can route deterministically (R10, KTD6).
@@ -24,6 +24,7 @@ from typing import Awaitable, Callable
 
 from app.adapters.base import AgentRuntimeAdapter, TaskInput, TaskResult
 from app.domain.remittance.compliance import format_output, screen_from_dict
+from app.domain.remittance.json_extract import JsonExtractError, extract_json_object
 from app.domain.remittance.types import ComplianceResult
 
 log = logging.getLogger(__name__)
@@ -57,9 +58,10 @@ class ComplianceAdapter(AgentRuntimeAdapter):
         Never calls ``on_event`` — there are no Goose streaming events to forward.
         """
         try:
-            brief_dict = json.loads(task.task_content)
+            brief_dict = extract_json_object(task.task_content)
             result = screen_from_dict(brief_dict, rules_path=self._rules_path)
         except (
+            JsonExtractError,
             json.JSONDecodeError,
             ValueError,
             TypeError,

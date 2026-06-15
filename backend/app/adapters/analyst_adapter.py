@@ -8,6 +8,7 @@ from typing import Awaitable, Callable
 
 from app.adapters.base import AgentRuntimeAdapter, TaskInput, TaskResult
 from app.domain.remittance.analyst import analyze, format_output
+from app.domain.remittance.json_extract import JsonExtractError, extract_json_object
 from app.domain.remittance.types import (
     AnalystInput,
     AnalystResult,
@@ -38,7 +39,7 @@ class AnalystAdapter(AgentRuntimeAdapter):
         on_event: Callable[[dict], Awaitable[None]],
     ) -> TaskResult:
         try:
-            payload = json.loads(task.task_content)
+            payload = extract_json_object(task.task_content)
             analyst_input = AnalystInput.from_dict(payload)
             if analyst_input.compliance.status != "CLEARED":
                 return TaskResult(
@@ -56,7 +57,7 @@ class AnalystAdapter(AgentRuntimeAdapter):
                 reports_dir=self._reports_dir,
                 compliance_notes=analyst_input.compliance.notes,
             )
-        except (json.JSONDecodeError, ValueError, TypeError, KeyError, AttributeError, OSError) as exc:
+        except (JsonExtractError, json.JSONDecodeError, ValueError, TypeError, KeyError, AttributeError, OSError) as exc:
             log.warning("AnalystAdapter: failed to process task_content: %s", exc)
             result = AnalystResult(
                 status="NEEDS_MORE_DATA",

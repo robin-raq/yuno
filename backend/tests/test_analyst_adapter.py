@@ -71,6 +71,28 @@ def test_compose_analyst_task_input_round_trips():
     assert restored.compliance.status == "CLEARED"
 
 
+def test_compose_analyst_task_input_parses_prose_wrapped_brief():
+    brief = assemble_brief(
+        "send $500 cash to Bogotá",
+        memory_defaults=MEMORY_DEFAULTS,
+        fixture_path=FIXTURE_PATH,
+    )
+    compliance = screen_from_dict(brief.to_dict(), rules_path=RULES_PATH)
+    wrapped_brief = f"Research complete.\n{json.dumps(brief.to_dict())}\nThanks."
+    payload = compose_analyst_task_input(wrapped_brief, format_output(compliance))
+    restored = AnalystInput.from_dict(json.loads(payload))
+    assert restored.brief.amount_usd == 500.0
+    assert restored.compliance.status == "CLEARED"
+
+
+@pytest.mark.asyncio
+async def test_invoke_recommendation_from_prose_wrapped_analyst_input(adapter):
+    payload = _analyst_input_json()
+    wrapped = f"Analyst input follows:\n```json\n{payload}\n```"
+    result = await adapter.invoke(_task(wrapped), _no_event)
+    assert result.output.splitlines()[0] == ROUTE_ANALYST_RECOMMENDATION
+
+
 @pytest.mark.asyncio
 async def test_invoke_recommendation_from_analyst_input(adapter):
     result = await adapter.invoke(_task(_analyst_input_json()), _no_event)
