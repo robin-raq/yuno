@@ -20,6 +20,7 @@ Coverage:
   S7  feedback_sent event shape (run_id, from_agent, to_agent, iteration).
   S8  feedback_loop_capped event shape (run_id, edge_id, iteration_count).
   S9  forced_complete column is persisted, not only carried in the event.
+  S10 loop-back task input threads sender output into target prompt (U12).
 """
 import json
 import uuid
@@ -418,3 +419,21 @@ async def test_loop_task_records_feedback_iteration_count(db, branch):
     counts = [t["feedback_iteration_count"] for t in coder_tasks]
     # original pass (0) + two loop-backs (1, 2)
     assert counts == [0, 1, 2]
+
+
+# ── S10: loop-back input threads sender output (U12) ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_loop_back_input_contains_prompt_and_sender_output(db, branch):
+    """Loop-back task input must carry the target prompt AND the sender's output."""
+    adapter = make_scripted_adapter({"write": "looks ok", "review": "REJECTED: fix tests"})
+    worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
+    await _start(worker, branch)
+    await _drain(worker, db)
+
+    coder_tasks = await _tasks_for_node(db, branch["run"], branch["n_coder"])
+    assert len(coder_tasks) >= 2
+    looped = coder_tasks[1]
+    assert "Write code." in looped["input"]
+    assert "REJECTED: fix tests" in looped["input"]
+    assert "--- FEEDBACK FROM PREVIOUS STEP ---" in looped["input"]

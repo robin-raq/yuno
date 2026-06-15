@@ -1032,6 +1032,26 @@ python3 -m pytest tests/ -q
 
 ---
 
+### Story: S2-REM — Remittance Comparison workflow (Phase C: U12 loop-back input threading)
+**Date:** 2026-06-14
+**Status:** [ ] In Progress  [x] Complete  [ ] Blocked
+
+> Plan source: `docs/plans/2026-06-14-001-feat-remittance-comparison-workflow-plan.md` (U12).
+
+#### AI Tools and Models Used
+- Claude via Cursor — test-first change to `_dispatch_next` `is_loop` branch only.
+
+#### Important Prompts and Key Decisions
+- `compose_loop_back_input(task_prompt, task_output)` appends delimited feedback block.
+- Forward (`always`) dispatch unchanged; same string on `agent_tasks.input` and enqueue item.
+- S10 test: loop-back Coder task contains prompt + REJECTED sender output.
+
+#### TDD Evidence (U12)
+- `test_loop_back_input_contains_prompt_and_sender_output` (S10).
+- Graph suites: 32 passed; full suite 174 passed, 1 skipped.
+
+---
+
 ### Story: S3 — Live Telegram channel
 **Date:** _(fill in)_
 **Status:** [ ] In Progress  [ ] Complete  [ ] Blocked

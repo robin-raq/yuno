@@ -60,6 +60,23 @@ from app.services.message_bus import (
 
 log = logging.getLogger(__name__)
 
+_FEEDBACK_BLOCK_START = "--- FEEDBACK FROM PREVIOUS STEP ---"
+_FEEDBACK_BLOCK_END = "--- END FEEDBACK ---"
+
+
+def compose_loop_back_input(task_prompt: str, task_output: str | None) -> str:
+    """Compose loop-back task input: static prompt plus delimited upstream output."""
+    prompt = (task_prompt or "").strip()
+    feedback = (task_output or "").strip()
+    if not feedback:
+        return prompt
+    return (
+        f"{prompt}\n\n{_FEEDBACK_BLOCK_START}\n"
+        f"{feedback}\n"
+        f"{_FEEDBACK_BLOCK_END}"
+    )
+
+
 _DEFAULT_FEEDBACK_CAP = 2  # BUILD_SPEC §9.3 default when neither edge nor agent set it
 
 
@@ -163,6 +180,11 @@ async def _dispatch_next(
         raise ValueError(f"Next node {edge['to_node_id']!r} not found in workflow_nodes")
 
     next_task_id = str(uuid.uuid4())
+    next_input = (
+        compose_loop_back_input(next_node["task_prompt"], task_output)
+        if is_loop
+        else next_node["task_prompt"]
+    )
     await db.execute(insert(agent_tasks).values(
         id=next_task_id,
         run_id=item.run_id,
@@ -170,7 +192,7 @@ async def _dispatch_next(
         agent_id=next_node["agent_id"],
         source="workflow",
         status="pending",
-        input=next_node["task_prompt"],
+        input=next_input,
         feedback_iteration_count=iteration if is_loop else 0,
     ))
 
@@ -204,7 +226,7 @@ async def _dispatch_next(
         task_id=next_task_id,
         agent_id=next_node["agent_id"],
         node_id=next_node["id"],
-        input=next_node["task_prompt"],
+        input=next_input,
     ))
 
     return AdvanceResult(
