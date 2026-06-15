@@ -1054,6 +1054,26 @@ python3 -m pytest tests/ -q
 
 ---
 
+### Story: S2-REM — Remittance Comparison workflow (Phase D: U9 workflow integration tests)
+**Date:** 2026-06-14
+**Status:** [ ] In Progress  [x] Complete  [ ] Blocked
+
+> Plan source: `docs/plans/2026-06-14-001-feat-remittance-comparison-workflow-plan.md` (U9).
+
+#### AI Tools and Models Used
+- Claude via Cursor — ce-work execution; integration tests exposed graph handoff gaps fixed in f2ef1ef.
+
+#### Important Prompts and Key Decisions
+- Programmable fake for Research/Analyst; Compliance always real.
+- Engine fixes (U9 blockers): forward ``task_output`` handoff; back-edge loop detection via ``position_x``.
+- Six scenarios including real ``analyst.analyze`` terminal routing (F3 anti-laundering guard).
+
+#### TDD Evidence (U9)
+- 6 tests in `test_remittance_workflow.py`.
+- Full suite: 187 passed, 1 skipped.
+
+---
+
 ### Story: S2-REM — Remittance Comparison workflow (Phase C: U12 loop-back input threading)
 **Date:** 2026-06-14
 **Status:** [ ] In Progress  [x] Complete  [ ] Blocked
