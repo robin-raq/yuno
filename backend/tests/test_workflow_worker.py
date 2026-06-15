@@ -18,10 +18,12 @@ Coverage:
   W11 failure path: db session remains usable after failure
   W12 Unit 3 compat: start_run does NOT auto-execute (queue stays empty)
   W13 Unit 4 compat: MessageBusService tests are unaffected (bus unused here)
+  W14 Compliance agent routes through scripted ComplianceAdapter (U6)
 """
 import asyncio
 import json
 import uuid
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -29,6 +31,7 @@ import pytest_asyncio
 from sqlalchemy import delete, insert, select, text
 
 from app.adapters.base import TaskInput, TaskResult
+from app.domain.remittance.research import assemble_brief
 from app.models import agent_config, agents, agent_tasks, execution_events, workflow_nodes, workflow_runs, workflows
 from app.services.message_bus import (
     InMemoryWorkflowQueue,
@@ -154,6 +157,76 @@ async def seed(db):
         "node_id": node_id,
         "run_id": run_id,
         "task_id": task_id,
+    }
+
+
+_COMPLIANCE_MEMORY = {
+    "sender_city": "Austin, TX",
+    "sender_country": "US",
+    "recipient_country": "Colombia",
+    "recipient_city": "Bogotá",
+    "send_currency": "USD",
+    "receive_currency": "COP",
+}
+_COMPLIANCE_FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "transfer_fixture.json"
+
+
+def _compliance_brief_json() -> str:
+    brief = assemble_brief(
+        "send $500 cash to Bogotá",
+        memory_defaults=_COMPLIANCE_MEMORY,
+        fixture_path=_COMPLIANCE_FIXTURE,
+    )
+    return json.dumps(brief.to_dict())
+
+
+@pytest_asyncio.fixture
+async def compliance_seed(db):
+    """Compliance agent on a terminal node — for U6 scripted-adapter routing."""
+    agent_id = str(uuid.uuid4())
+    workflow_id = str(uuid.uuid4())
+    node_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    task_id = str(uuid.uuid4())
+    brief_json = _compliance_brief_json()
+
+    await db.execute(insert(agents).values(
+        id=agent_id, name="Compliance", role="compliance",
+        system_prompt="Deterministic compliance screening.", model="claude-haiku-4-5-20251001",
+        status="active",
+    ))
+    await db.execute(insert(agent_config).values(
+        id=str(uuid.uuid4()), agent_id=agent_id,
+        extensions='["developer"]', requires_approval=0,
+        max_tokens_per_run=50000, max_runs_per_minute=6,
+        blocked_extensions="[]", max_feedback_iterations=2,
+        max_turns=5, timeout_seconds=60,
+    ))
+    await db.execute(insert(workflows).values(
+        id=workflow_id, name="Compliance Worker Test", description="",
+    ))
+    await db.execute(insert(workflow_nodes).values(
+        id=node_id, workflow_id=workflow_id, agent_id=agent_id,
+        node_type="end", task_prompt="Screen the transfer brief.",
+        position_x=0, position_y=0,
+    ))
+    await db.execute(insert(workflow_runs).values(
+        id=run_id, workflow_id=workflow_id, status="pending",
+        forced_complete=0, started_at="2026-01-01T00:00:00+00:00",
+    ))
+    await db.execute(insert(agent_tasks).values(
+        id=task_id, run_id=run_id, node_id=node_id, agent_id=agent_id,
+        source="workflow", status="pending", input=brief_json,
+    ))
+    await db.commit()
+
+    return {
+        "agent_id": agent_id,
+        "workflow_id": workflow_id,
+        "node_id": node_id,
+        "run_id": run_id,
+        "task_id": task_id,
+        "brief_json": brief_json,
     }
 
 
@@ -477,3 +550,35 @@ async def test_failure_handler_write_failure_is_surfaced(db, seed, caplog):
                 await worker.process_dispatch_item(db, _make_item(seed))
 
     assert any("may be stuck in 'running'" in r.message for r in caplog.records)
+
+
+# ── W14: Compliance agent uses scripted adapter (U6) ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_compliance_agent_uses_scripted_adapter(db, compliance_seed):
+    """Compliance node must invoke ComplianceAdapter, not the injected FakeAdapter."""
+    fake = FakeAdapter()
+    worker = WorkflowWorker(
+        MessageBusService(InMemoryWorkflowQueue()),
+        adapter_cls=lambda **_: fake,
+    )
+    item = WorkflowDispatchItem(
+        run_id=compliance_seed["run_id"],
+        task_id=compliance_seed["task_id"],
+        agent_id=compliance_seed["agent_id"],
+        node_id=compliance_seed["node_id"],
+        input=compliance_seed["brief_json"],
+    )
+
+    await worker.process_dispatch_item(db, item)
+
+    assert fake.invoke_count == 0
+    task = (
+        await db.execute(select(agent_tasks).where(agent_tasks.c.id == compliance_seed["task_id"]))
+    ).mappings().one()
+    assert task["status"] == "completed"
+    assert task["output"].startswith("COMPLIANCE=CLEARED")
+    run = (
+        await db.execute(select(workflow_runs).where(workflow_runs.c.id == compliance_seed["run_id"]))
+    ).mappings().one()
+    assert run["status"] == "completed"

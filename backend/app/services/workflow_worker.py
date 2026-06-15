@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.acp_goose import AcpGooseAdapter
 from app.adapters.base import TaskInput, TaskResult
+from app.adapters.compliance_adapter import ComplianceAdapter
 from app.database import AsyncSessionLocal
 from app.models import agent_tasks, execution_events, workflow_runs
 from app.services.agent_service import assemble_context_preamble, get_agent
@@ -50,6 +51,10 @@ if TYPE_CHECKING:
     from app.adapters.base import AgentRuntimeAdapter
 
 log = logging.getLogger(__name__)
+
+SCRIPTED_AGENTS: dict[str, type["AgentRuntimeAdapter"]] = {
+    "Compliance": ComplianceAdapter,
+}
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 3284
@@ -113,7 +118,7 @@ class WorkflowWorker:
                     )
                     await s.commit()
 
-            adapter = self._adapter_cls(host=self._host, port=self._port)
+            adapter = self._pick_adapter(agent)
             result = await asyncio.wait_for(
                 adapter.invoke(task_input, _persist_event),
                 timeout=task_input.timeout_seconds,
@@ -171,6 +176,13 @@ class WorkflowWorker:
             agent_id=item.agent_id,
         )
         await db.commit()
+
+    def _pick_adapter(self, agent: dict | None) -> "AgentRuntimeAdapter":
+        """Route scripted agents through their domain adapter; others use ``adapter_cls``."""
+        if agent and agent.get("name") in SCRIPTED_AGENTS:
+            scripted_cls = SCRIPTED_AGENTS[agent["name"]]
+            return scripted_cls(host=self._host, port=self._port)
+        return self._adapter_cls(host=self._host, port=self._port)
 
     def _build_task_input(
         self, item: WorkflowDispatchItem, agent: dict | None, preamble: str
