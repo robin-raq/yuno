@@ -231,6 +231,30 @@ def test_missing_previously_flagged_fails_closed():
     assert "previously_flagged" in result.issue or "absent" in result.issue.lower()
 
 
+def test_null_previously_flagged_fails_closed():
+    """Key present with JSON null must not bypass rule 5 (KTD3 fail-closed)."""
+    raw = {
+        "transfer_type": "cash_send",
+        "amount_usd": 500.0,
+        "sender_city": "Austin, TX",
+        "sender_country": "US",
+        "recipient_country": "Colombia",
+        "recipient_city": "Bogotá",
+        "send_currency": "USD",
+        "receive_currency": "COP",
+        "data_source": "fixture",
+        "sender_profile": {
+            "previously_flagged": None,
+            "kyc_verified": True,
+            "account_tier": "standard",
+        },
+    }
+    result = screen_from_dict(raw, rules_path=RULES_PATH)
+    assert result.status == "FLAGGED"
+    assert result.issue is not None
+    assert "boolean" in result.issue.lower()
+
+
 def test_null_sender_profile_fails_closed():
     """Raw brief dict with ``"sender_profile": null`` must fail closed, not raise TypeError.
 

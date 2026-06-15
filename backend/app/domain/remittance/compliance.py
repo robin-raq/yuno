@@ -116,6 +116,15 @@ def screen_from_dict(brief_dict: dict[str, Any], *, rules_path: str | Path) -> C
                 "failing closed per KTD3 (missing flag ≠ not flagged)."
             ),
         )
+    flagged = sp.get("previously_flagged")
+    if not isinstance(flagged, bool):
+        return ComplianceResult(
+            status="FLAGGED",
+            issue=(
+                "sender_profile.previously_flagged must be a boolean; "
+                f"got {type(flagged).__name__!r} — failing closed per KTD3."
+            ),
+        )
     brief = TransferBrief.from_dict(brief_dict)
     return screen(brief, rules_path=rules_path)
 

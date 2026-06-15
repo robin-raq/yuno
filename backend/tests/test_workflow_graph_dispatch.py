@@ -223,6 +223,15 @@ def test_edge_matches_none_output():
     assert edge_matches("keyword", None) is False
 
 
+def test_edge_matches_sentinel_conditions_use_first_line_only():
+    """KTD6: COMPLIANCE= conditions must not match sentinels echoed in the body."""
+    output = "COMPLIANCE=FLAGGED\nCountry COMPLIANCE=CLEARED is restricted."
+    assert edge_matches("COMPLIANCE=CLEARED", output) is False
+    assert edge_matches("COMPLIANCE=FLAGGED", output) is True
+    cleared = "COMPLIANCE=CLEARED\nNotes only."
+    assert edge_matches("COMPLIANCE=CLEARED", cleared) is True
+
+
 # ── G1: Linear graph dispatch ─────────────────────────────────────────────────
 
 @pytest.mark.asyncio

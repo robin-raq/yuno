@@ -148,6 +148,14 @@ def test_needs_more_data_when_rate_missing(tmp_path):
     assert format_output(result).startswith("ANALYST=NEEDS_MORE_DATA")
 
 
+def test_needs_more_data_when_no_providers_present(tmp_path):
+    brief = _brief_from_fixture(western_union=None, moneygram=None, wise=None)
+    result = analyze(brief, reports_dir=tmp_path / "reports")
+    assert result.status == "NEEDS_MORE_DATA"
+    assert any("western_union" in field for field in result.missing_fields)
+    assert not (tmp_path / "reports" / "transfer_comparison.md").exists()
+
+
 # ── Report write ──────────────────────────────────────────────────────────────
 
 def test_successful_analyze_writes_report(tmp_path):

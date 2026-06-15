@@ -59,7 +59,14 @@ class ComplianceAdapter(AgentRuntimeAdapter):
         try:
             brief_dict = json.loads(task.task_content)
             result = screen_from_dict(brief_dict, rules_path=self._rules_path)
-        except (json.JSONDecodeError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        except (
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+            KeyError,
+            AttributeError,
+            OSError,
+        ) as exc:
             # Fail closed on any parse or validation failure — a raise here would
             # route through the worker's task_failed/workflow_failed path and suppress
             # the issue; the graph needs a visible FLAGGED terminal output (R10).

@@ -225,6 +225,17 @@ async def test_flagged_output_never_contains_cleared_sentinel(adapter):
         assert edge_matches(ROUTE_COMPLIANCE_CLEARED, result.output) is False
 
 
+# ── 8b. Missing rules file fails closed ───────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_invoke_missing_rules_file_fails_closed():
+    """Unreadable rules_path returns COMPLIANCE=FLAGGED, not a worker failure."""
+    adapter = ComplianceAdapter(rules_path="/nonexistent/compliance_rules.json")
+    result = await adapter.invoke(_task(json.dumps(_valid_brief())), _no_event)
+    assert result.output.splitlines()[0] == "COMPLIANCE=FLAGGED"
+    assert "failing closed" in result.output.lower()
+
+
 # ── 9. No Goose, DB, network, or worker dependency ───────────────────────────
 
 @pytest.mark.asyncio

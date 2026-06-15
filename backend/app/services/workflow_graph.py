@@ -93,12 +93,17 @@ def edge_matches(condition: str, output: str | None) -> bool:
     'always' (case-insensitive) always matches regardless of output. All other
     conditions are substring-matched case-insensitively against output; a None
     output does not match any non-always condition.
+
+    Conditions containing ``=`` (KTD6 sentinels such as ``COMPLIANCE=CLEARED``)
+    match only the first line of output so a FLAGGED body cannot fail-open by
+    echoing an upstream sentinel in prose.
     """
     if condition.lower() == "always":
         return True
     if output is None:
         return False
-    return condition.lower() in output.lower()
+    haystack = output.splitlines()[0] if "=" in condition else output
+    return condition.lower() in haystack.lower()
 
 
 async def advance_after_task_completion(

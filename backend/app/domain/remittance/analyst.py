@@ -159,6 +159,18 @@ def analyze(
     if gaps:
         return AnalystResult(status="NEEDS_MORE_DATA", missing_fields=gaps)
 
+    present = providers_for_brief(brief)
+    if not present:
+        expected = ("western_union", "moneygram") if brief.transfer_type == "cash_send" else (
+            "western_union",
+            "moneygram",
+            "wise",
+        )
+        return AnalystResult(
+            status="NEEDS_MORE_DATA",
+            missing_fields=[f"{key} (no quote present)" for key in expected],
+        )
+
     scores = score_providers(brief)
     winner_key = pick_winner(brief, scores)
     winner_label = provider_label(winner_key)
