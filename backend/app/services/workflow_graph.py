@@ -9,14 +9,11 @@ Unit 7 (semantics): feedback-loop cap (§9.3), no_matching_edge failure (§9.5),
 and correct conditional branch selection across all outgoing edges (§9.2).
 
 Loop-edge definition (scoped heuristic):
-- A loop edge is an edge that (a) has a non-"always" condition AND (b) points to
-  a node that has already executed in this run. The "always" edges are forward
-  progression by construction in the seed templates; feedback edges carry a real
-  condition (REJECTED, NEEDS_MORE_DATA). Without the non-"always" guard, the
-  forward edge in a 2-cycle would itself be classed as a loop once the cycle is
-  entered, capping normal flow and miscounting iterations. A purely structural
-  "points to an already-executed node" rule is deferred (it needs real cycle/path
-  analysis for arbitrary graphs).
+- A loop edge is an edge that (a) has a non-"always" condition, (b) points to
+  a node that has already executed in this run, and (c) points *backward* in the
+  seeded layout (``to_node.position_x < from_node.position_x``). Without (c), a
+  conditional forward re-entry (Compliance→Analyst after a Research loop-back)
+  would be misclassified as a feedback loop.
 
 Iteration counter:
 - loops_taken for a loop edge = (number of prior tasks for its to_node in this
@@ -124,8 +121,16 @@ async def advance_after_task_completion(
     eligible: list[tuple[dict, bool, int | None]] = []
     capped_any = False
     for edge in matched:
-        is_loop = edge["condition"].lower() != "always" and await _node_executed(
-            db, item.run_id, edge["to_node_id"]
+        to_node = await _get_node(db, edge["to_node_id"])
+        is_back_edge = (
+            to_node is not None
+            and completed_node is not None
+            and to_node["position_x"] < completed_node["position_x"]
+        )
+        is_loop = (
+            edge["condition"].lower() != "always"
+            and is_back_edge
+            and await _node_executed(db, item.run_id, edge["to_node_id"])
         )
         if not is_loop:
             eligible.append((edge, False, None))
@@ -180,11 +185,13 @@ async def _dispatch_next(
         raise ValueError(f"Next node {edge['to_node_id']!r} not found in workflow_nodes")
 
     next_task_id = str(uuid.uuid4())
-    next_input = (
-        compose_loop_back_input(next_node["task_prompt"], task_output)
-        if is_loop
-        else next_node["task_prompt"]
-    )
+    if is_loop:
+        next_input = compose_loop_back_input(next_node["task_prompt"], task_output)
+    elif task_output:
+        # Forward handoff: prior agent output becomes the next task input (BUILD_SPEC §7.1).
+        next_input = task_output
+    else:
+        next_input = next_node["task_prompt"]
     await db.execute(insert(agent_tasks).values(
         id=next_task_id,
         run_id=item.run_id,

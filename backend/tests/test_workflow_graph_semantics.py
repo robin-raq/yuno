@@ -202,7 +202,7 @@ async def _start(worker: WorkflowWorker, ids: dict) -> None:
 async def test_loop_cap_fires_at_boundary(db, branch):
     """REJECTED forever: the loop edge is taken exactly twice (Coder runs 3x),
     the 3rd REJECTED is capped, run completes forced (not failed)."""
-    adapter = make_scripted_adapter({"write": "looks ok", "review": "REJECTED"})
+    adapter = make_scripted_adapter({"write": "looks ok", "looks ok": "REJECTED"})
     worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
     await _start(worker, branch)
     await _drain(worker, db)
@@ -229,7 +229,7 @@ async def test_loop_cap_fires_at_boundary(db, branch):
 @pytest.mark.asyncio
 async def test_loop_cap_emits_two_feedback_sent(db, branch):
     """Exactly two feedback_sent events (the two accepted loop-backs)."""
-    adapter = make_scripted_adapter({"write": "looks ok", "review": "REJECTED"})
+    adapter = make_scripted_adapter({"write": "looks ok", "looks ok": "REJECTED"})
     worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
     await _start(worker, branch)
     await _drain(worker, db)
@@ -249,7 +249,7 @@ async def test_edge_max_iterations_override(db, branch):
                      .values(max_iterations=1))
     await db.commit()
 
-    adapter = make_scripted_adapter({"write": "looks ok", "review": "REJECTED"})
+    adapter = make_scripted_adapter({"write": "looks ok", "looks ok": "REJECTED"})
     worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
     await _start(worker, branch)
     await _drain(worker, db)
@@ -269,7 +269,7 @@ async def test_null_edge_falls_back_to_agent_default(db, branch):
                      .values(max_iterations=None))
     await db.commit()
 
-    adapter = make_scripted_adapter({"write": "looks ok", "review": "REJECTED"})
+    adapter = make_scripted_adapter({"write": "looks ok", "looks ok": "REJECTED"})
     worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
     await _start(worker, branch)
     await _drain(worker, db)
@@ -285,7 +285,7 @@ async def test_null_edge_falls_back_to_agent_default(db, branch):
 async def test_branch_selection_approved_takes_forward_edge(db, branch):
     """APPROVED takes the forward edge to Deployer, not the loop back to Coder."""
     adapter = make_scripted_adapter(
-        {"write": "looks ok", "review": "APPROVED", "deploy": "shipped"}
+        {"write": "looks ok", "looks ok": "APPROVED", "approved": "shipped"}
     )
     worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
     await _start(worker, branch)
@@ -309,7 +309,7 @@ async def test_branch_selection_approved_takes_forward_edge(db, branch):
 async def test_no_matching_edge_fails_run(db, branch):
     """A middle node whose output matches no outgoing edge fails the run with
     reason no_matching_edge; the completed task stays completed; nothing enqueued."""
-    adapter = make_scripted_adapter({"write": "looks ok", "review": "UNCLEAR"})
+    adapter = make_scripted_adapter({"write": "looks ok", "looks ok": "UNCLEAR"})
     bus = _make_bus()
     worker = WorkflowWorker(bus, adapter_cls=adapter)
     await _start(worker, branch)
@@ -334,7 +334,7 @@ async def test_no_matching_edge_fails_run(db, branch):
 async def test_end_node_completes_unforced(db, branch):
     """Reaching the Deployer (end) via APPROVED completes the run unforced."""
     adapter = make_scripted_adapter(
-        {"write": "looks ok", "review": "APPROVED", "deploy": "shipped"}
+        {"write": "looks ok", "looks ok": "APPROVED", "approved": "shipped"}
     )
     worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
     await _start(worker, branch)
@@ -353,7 +353,7 @@ async def test_end_node_completes_unforced(db, branch):
 @pytest.mark.asyncio
 async def test_feedback_sent_event_shape(db, branch):
     """feedback_sent carries run_id, from_agent (Reviewer), to_agent (Coder), iteration."""
-    adapter = make_scripted_adapter({"write": "looks ok", "review": "REJECTED"})
+    adapter = make_scripted_adapter({"write": "looks ok", "looks ok": "REJECTED"})
     worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
     await _start(worker, branch)
     await _drain(worker, db)
@@ -372,7 +372,7 @@ async def test_feedback_sent_event_shape(db, branch):
 @pytest.mark.asyncio
 async def test_feedback_loop_capped_event_shape(db, branch):
     """feedback_loop_capped carries run_id, edge_id (the loop edge), iteration_count."""
-    adapter = make_scripted_adapter({"write": "looks ok", "review": "REJECTED"})
+    adapter = make_scripted_adapter({"write": "looks ok", "looks ok": "REJECTED"})
     worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
     await _start(worker, branch)
     await _drain(worker, db)
@@ -392,7 +392,7 @@ async def test_loop_handoff_is_feedback_message(db, branch):
     """The handoff message for a loop-back is msg_type=feedback (not task_output)."""
     from app.models import agent_messages
 
-    adapter = make_scripted_adapter({"write": "looks ok", "review": "REJECTED"})
+    adapter = make_scripted_adapter({"write": "looks ok", "looks ok": "REJECTED"})
     worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
     await _start(worker, branch)
     await _drain(worker, db)
@@ -410,7 +410,7 @@ async def test_loop_handoff_is_feedback_message(db, branch):
 async def test_loop_task_records_feedback_iteration_count(db, branch):
     """The looped-back Coder tasks persist feedback_iteration_count (1, 2) on the
     row, not only in the feedback_sent event."""
-    adapter = make_scripted_adapter({"write": "looks ok", "review": "REJECTED"})
+    adapter = make_scripted_adapter({"write": "looks ok", "looks ok": "REJECTED"})
     worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
     await _start(worker, branch)
     await _drain(worker, db)
@@ -426,7 +426,7 @@ async def test_loop_task_records_feedback_iteration_count(db, branch):
 @pytest.mark.asyncio
 async def test_loop_back_input_contains_prompt_and_sender_output(db, branch):
     """Loop-back task input must carry the target prompt AND the sender's output."""
-    adapter = make_scripted_adapter({"write": "looks ok", "review": "REJECTED: fix tests"})
+    adapter = make_scripted_adapter({"write": "looks ok", "looks ok": "REJECTED: fix tests"})
     worker = WorkflowWorker(_make_bus(), adapter_cls=adapter)
     await _start(worker, branch)
     await _drain(worker, db)
