@@ -827,7 +827,7 @@ python3 -m pytest tests/ -q
   in SenderProfile but no rule currently uses them. The NEEDS_REVIEW fixture case references
   "account tier and corridor combination" — this logic belongs with NEEDS_REVIEW semantics
   and is deferred to U8.
-- **U5 ComplianceAdapter** — not started; U4 provides `format_output` for U5 to import.
+- **U5 ComplianceAdapter** — implemented; see entry below.
 - **U6 worker adapter selection** — not started.
 
 #### Review Tier Decision (U4)
@@ -843,6 +843,142 @@ python3 -m pytest tests/ -q
 - Defer — accumulate with the broader remittance closeout. The fail-closed seam
   (screen_from_dict) and format_output as a shared sentinel helper are reusable patterns,
   but capturing them now would be premature. Document at S2-REM phase closeout.
+
+---
+
+### Story: S2-REM — Remittance Comparison workflow (Phase B: U5 ComplianceAdapter)
+**Date:** 2026-06-14
+**Status:** [x] In Progress  [ ] Complete  [ ] Blocked
+
+> Same gate limitation as Phase A/B: `make ai-usage-check` has no phase name for the
+> remittance plan's units, so this entry is maintained manually. Plan source:
+> `docs/plans/2026-06-14-001-feat-remittance-comparison-workflow-plan.md` (U5).
+
+#### AI Tools and Models Used
+- Claude Sonnet 4.6 via Claude Code — read U5 spec + adapter interface + types + compliance
+  engine, then TDD (failing test → adapter → green).
+- ce-correctness-reviewer (compound-engineering) — targeted review post-initial-green;
+  found one P1 blocking issue (F1) fixed before reporting.
+
+#### Important Prompts and Key Decisions
+- Scoped to "U5 only — ComplianceAdapter"; explicit do-not list (no worker/graph changes,
+  no seed, no Telegram, no frontend, no Analyst/Research logic); do-not-commit; test-first.
+- Decisions:
+  - `ComplianceAdapter(host=..., port=..., *, rules_path=None)` — `host`/`port` accepted
+    and ignored for swap-compatibility with `AcpGooseAdapter` constructor signature.
+    `rules_path` is keyword-only for testability; defaults to `_DEFAULT_RULES_PATH`
+    (the committed `backend/fixtures/compliance_rules.json`).
+  - **Fail-closed on JSON parse AND on `TransferBrief.from_dict` failure (F1 fix):**
+    the try/except wraps BOTH `json.loads` AND `screen_from_dict`. Before the review,
+    only `json.loads` was wrapped; `from_dict` could raise `KeyError` (missing required
+    field), `ValueError` (invalid enum), or `AttributeError` (non-dict JSON value like
+    a list) after the except block, routing through the worker's `task_failed`/
+    `workflow_failed` path with the issue suppressed. The fix catches all five exception
+    types: `(json.JSONDecodeError, ValueError, TypeError, KeyError, AttributeError)`.
+  - **Return FLAGGED, do not raise:** a raised exception routes through the worker's
+    exception handler → `task_failed`/`workflow_failed`, leaving the run `failed` with
+    the issue suppressed. The graph needs a visible FLAGGED terminal output (R10, plan
+    KTD6). The adapter therefore returns `TaskResult(output=format_output(FLAGGED))` on
+    every bad-input path.
+  - **`on_event` never called:** a deterministic scripted adapter has no Goose stream to
+    forward. The test passes a `_no_event` spy that raises on any call.
+  - **`tokens_total=0`, `estimated_cost=0.0`:** `TaskResult` defaults; no explicit
+    assignment needed. The adapter always returns `TaskResult(output=...)` and the
+    dataclass defaults handle the rest.
+  - **`_DEFAULT_RULES_PATH`:** `Path(__file__).resolve().parent.parent.parent / "fixtures"
+    / "compliance_rules.json"` resolves from `backend/app/adapters/compliance_adapter.py`
+    to `backend/fixtures/compliance_rules.json`. Verified against the committed layout.
+
+#### TDD Evidence (U5)
+- RED:   `pytest tests/test_compliance_adapter.py -q` → `ModuleNotFoundError:
+         No module named 'app.adapters.compliance_adapter'` (expected red).
+- GREEN: `pytest tests/test_compliance_adapter.py -q` → 14 passed.
+- **Post-review fix (P1 F1) + 2 new tests** → 16 tests total.
+- 16 scenarios covering: ABC conformance, swap-compatible constructor (host/port ignored),
+  $500 CLEARED sentinel on line 1, tokens_total=0/estimated_cost=0.0, previously-flagged
+  sender FLAGGED, missing previously_flagged fail-closed, null sender_profile fail-closed,
+  malformed payload (non-JSON) fail-closed, empty payload fail-closed, incomplete JSON
+  payload fail-closed (KeyError path — added post-review), non-dict JSON fail-closed
+  (AttributeError path — added post-review), output matches format_output for CLEARED,
+  output matches format_output for FLAGGED (AML threshold), FLAGGED output never contains
+  COMPLIANCE=CLEARED across all 5 FLAGGED paths + edge_matches guard, on_event never
+  called, health_check returns True without a server.
+
+#### Validation Commands Run
+```bash
+# TDD red (before implementation)
+python3 -m pytest tests/test_compliance_adapter.py -q
+#   → ModuleNotFoundError: No module named 'app.adapters.compliance_adapter'
+
+# TDD green (initial — 14 tests)
+python3 -m pytest tests/test_compliance_adapter.py -q
+#   → 14 passed in 0.43s
+
+# After P1 fix + 2 new tests (16 tests)
+python3 -m pytest tests/test_compliance_adapter.py -q
+#   → 16 passed in 0.45s
+python3 -m pytest tests/test_remittance_compliance.py -q
+#   → 27 passed in 0.55s
+python3 -m pytest tests/test_remittance_*.py -q
+#   → 67 passed in 0.53s
+python3 -m pytest tests/ -q
+#   → 165 passed, 1 skipped in 7.94s
+```
+
+#### Manual Review Performed
+- [x] Confirmed no Goose, DB, network, or worker imports in compliance_adapter.py.
+- [x] Confirmed `on_event` is never called (test spy raises on any call; all 16 pass).
+- [x] Confirmed fail-closed on every bad-input path (5 paths, all tested).
+- [x] Confirmed KTD6 sentinel on line 1 for both CLEARED and FLAGGED outputs.
+- [x] Confirmed FLAGGED output never contains COMPLIANCE=CLEARED (5-path enumeration +
+      edge_matches guard through the real graph matcher).
+- [x] Confirmed `tokens_total=0`, `estimated_cost=0.0` (TaskResult defaults; no LLM).
+- [x] Confirmed `health_check()` returns True without a running Goose server.
+- [x] No secrets in new files (fixture path and class definition only).
+- [x] No worker, graph, seed, frontend, Telegram, or planning doc files touched.
+
+#### Review Findings or Mistakes Caught
+- **F1 (P1) — fail-closed try/except too narrow — FIXED before commit:** the initial
+  implementation wrapped only `json.loads` in the try/except. A structurally valid JSON
+  payload missing required `TransferBrief` fields (e.g., `{"amount_usd": 500}` with no
+  `transfer_type`) caused `from_dict` to raise `KeyError` after the except block, routing
+  through the worker's `task_failed` path rather than returning `COMPLIANCE=FLAGGED`.
+  A non-dict JSON value (list, string) similarly raised `AttributeError` in
+  `brief_dict.get("sender_profile")`. Fixed by widening the except to wrap both
+  `json.loads` and `screen_from_dict`, catching five exception types:
+  `(json.JSONDecodeError, ValueError, TypeError, KeyError, AttributeError)`.
+  Two new tests added: `test_invoke_incomplete_json_payload_fails_closed` and
+  `test_invoke_non_dict_json_fails_closed`.
+- **F2 (P2, non-blocking) — test_output_matches_format_output is mildly tautological:**
+  both sides call `format_output` on the same result, so a bug in `format_output` itself
+  would be invisible. The real routing correctness signal comes from the sentinel-line-1
+  tests. Noted; not changed — the tautology is acceptable for contract documentation.
+
+#### Deferred or Blocked Work
+- **NEEDS_REVIEW sentinel path not tested:** the compliance engine never emits
+  NEEDS_REVIEW (deferred to U8). When U8 activates that route, a test for
+  `COMPLIANCE=NEEDS_REVIEW` on line 1 must be added.
+- **`FileNotFoundError` if rules_path missing:** `_load_rules` (in compliance.py) would
+  raise `FileNotFoundError` if the rules file is absent; this is not in the except clause
+  and would escape to the worker. For the demo the file is committed; deferred to production
+  hardening.
+- **U6 worker adapter selection** — not started; the plan's `SCRIPTED_AGENTS` registry
+  and `_pick_adapter` routing go in the worker (U6 scope).
+
+#### Review Tier Decision (U5)
+- **Classification: high-risk-lite.** U5 is the adapter seam that the worker will call
+  for the Compliance node. Fail-open bugs here mean a FLAGGED transfer reaches the Analyst.
+  The correctness reviewer found one P1 blocking issue (F1) and it was fixed.
+- **Review run:** targeted correctness review (ce-correctness-reviewer), read-only,
+  scoped to `compliance_adapter.py` + `test_compliance_adapter.py`.
+  **Verdict: Hold for fixes → fixed before commit.** All P1 issues resolved.
+  P2 findings noted and addressed or documented.
+
+#### `/ce-compound` Decision (U5)
+- Defer to S2-REM phase closeout. U5 adds the fail-closed adapter pattern (one except
+  wrapping the full parse+screen chain rather than splitting JSON parse from domain
+  validation) as a reusable design decision for scripted adapters. Capture with U3–U4
+  learnings at phase closeout.
 
 ---
 
