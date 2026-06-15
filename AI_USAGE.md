@@ -1139,6 +1139,56 @@ python3 -m pytest tests/ -q
 
 ---
 
+### P0 — Tolerant JSON handoff (Research → Compliance → Analyst)
+**Date:** 2026-06-15
+**Status:** [x] Complete (pending commit approval)
+
+#### AI Tools and Models Used
+- Claude via Cursor — TDD implementation and targeted self-review
+
+#### Important Prompts and Key Decisions
+- Added `extract_json_object()` in domain layer (not adapter-only) so `compose_analyst_task_input` and both scripted adapters share one parser.
+- Balanced-brace scan iterates every `{` offset so prose like `Notes {ignored}` does not block the real brief object.
+- `JsonExtractError` subclasses `ValueError`; ComplianceAdapter catches it and still returns visible `COMPLIANCE=FLAGGED` (fail-closed, no worker crash).
+- Did **not** touch `workflow_graph.py` — graph dispatch already forwards raw Research output; parser fix at adapter/domain seam is sufficient (full suite green).
+
+#### Validation Commands Run
+```bash
+cd backend
+pytest tests/test_json_extract.py -q                    # 7 passed
+pytest tests/test_compliance_adapter.py -q              # 19 passed
+pytest tests/test_analyst_adapter.py -q                 # 6 passed
+pytest tests/test_remittance_analyst.py -q              # passed
+pytest tests/test_remittance_workflow.py -q             # passed
+pytest tests/test_remittance_*.py -q                    # passed
+pytest tests/ -q                                        # 221 passed, 1 skipped
+```
+
+#### Manual Review Performed
+- [x] Reviewed diff for scope creep — only allowed backend handoff files + tests + AI_USAGE
+- [x] Verified no secrets in changed files
+- [x] Confirmed invalid JSON still → `COMPLIANCE=FLAGGED`, never `CLEARED`
+- [x] Confirmed clean raw-JSON fixture paths unchanged
+
+#### Review Findings or Mistakes Caught
+- Initial balanced-brace helper stopped at first `{...}` (`{ignored}`); fixed by scanning all brace offsets before giving up.
+- None remaining after fix.
+
+#### Deferred or Blocked Work
+- Frontend cherry-pick to `feat/frontend-design-foundation` still blocked (prior session).
+- Live Goose remittance run not re-smoked in this session — recommend manual Live API run after commit.
+
+#### ce-compound Decision
+- **Do not compound yet** — wait until live remittance cleared-path smoke confirms the fix; then document under `docs/solutions/` as a handoff-parsing pattern.
+
+#### Final Completion Status
+- [x] P0 tolerant JSON handoff implemented
+- [x] Required tests green
+- [ ] Commit (awaiting user approval)
+- [ ] Live API cleared-path proof
+
+---
+
 ### Story: S3 — Live Telegram channel
 **Date:** _(fill in)_
 **Status:** [ ] In Progress  [ ] Complete  [ ] Blocked
