@@ -13,6 +13,8 @@ from app.database import init_db
 from app.api.agents import router as agents_router
 from app.api.tasks import router as tasks_router
 from app.api.workflows import router as workflows_router
+from app.api.events import router as events_router
+from app.services.event_service import get_event_service
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger(__name__)
@@ -22,6 +24,7 @@ log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     log.info("Initialising database")
     await init_db()
+    get_event_service()  # singleton ready before first SSE subscriber
     log.info("Database ready")
     yield
     log.info("Shutdown")
@@ -40,6 +43,7 @@ app.add_middleware(
 app.include_router(agents_router)
 app.include_router(tasks_router)
 app.include_router(workflows_router)
+app.include_router(events_router)
 
 
 @app.get("/health")

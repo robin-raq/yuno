@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.services import workflow_service
 from app.services.workflow_service import (
-    WorkflowNotFound, GraphValidationError, RunNotFound,
+    WorkflowNotFound, GraphValidationError, RunNotFound, list_run_events,
 )
 
 router = APIRouter(tags=["workflows"])
@@ -39,5 +39,13 @@ async def start_run(workflow_id: str, body: RunCreate, db: AsyncSession = Depend
 async def get_run(run_id: str, db: AsyncSession = Depends(get_db)):
     try:
         return await workflow_service.get_run(db, run_id)
+    except RunNotFound:
+        raise HTTPException(404, detail={"error": "run_not_found", "message": f"Run {run_id} not found"})
+
+
+@router.get("/runs/{run_id}/events")
+async def get_run_events(run_id: str, db: AsyncSession = Depends(get_db)):
+    try:
+        return await list_run_events(db, run_id)
     except RunNotFound:
         raise HTTPException(404, detail={"error": "run_not_found", "message": f"Run {run_id} not found"})

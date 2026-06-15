@@ -16,6 +16,7 @@ from app.models import (
     agents, workflows, workflow_nodes, workflow_runs, agent_tasks,
     agent_messages, approval_requests, execution_events,
 )
+from app.services.event_service import get_event_service
 
 
 class WorkflowNotFound(Exception):
@@ -86,6 +87,14 @@ async def start_run(db: AsyncSession, workflow_id: str, initial_input: str) -> d
         "forced_complete": False,
         "started_at": now,
     }
+
+
+async def list_run_events(db: AsyncSession, run_id: str) -> list[dict]:
+    """REST history of execution_events for a run (BUILD_SPEC §6)."""
+    row = await db.execute(select(workflow_runs.c.id).where(workflow_runs.c.id == run_id))
+    if row.first() is None:
+        raise RunNotFound(run_id)
+    return await get_event_service().list_run_events(db, run_id)
 
 
 async def get_run(db: AsyncSession, run_id: str) -> dict:
