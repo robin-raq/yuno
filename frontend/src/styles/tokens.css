@@ -1,0 +1,68 @@
+:root {
+  --bg: #EDF0F6;
+  --surface: #FFFFFF;
+  --surface2: #F6F8FC;
+  --ink: #141B2E;
+  --ink2: #5B647A;
+  --ink3: #929BB0;
+  --line: #E4E8F0;
+  --line2: #EDF0F6;
+  --blue: #2F6BFF;
+  --blue-soft: #EAF0FF;
+  --navy: #1B2440;
+  --amber: #F4A024;
+  --amber-soft: #FDF1DC;
+  --green: #1E9E6A;
+  --green-soft: #E2F4EC;
+  --red: #E5484D;
+  --red-soft: #FCE9E9;
+  --indigo: #6E5BFF;
+  --teal: #1FA8A0;
+
+  --font-ui: 'Space Grotesk', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+
+  --shadow-card: 0 2px 0 var(--line), 0 8px 20px rgba(20,27,46,0.05);
+  --shadow-cta: 0 2px 0 #1f50cc, 0 6px 16px rgba(47,107,255,0.32);
+  --shadow-dark: 0 2px 0 #0d1322, 0 10px 24px rgba(27,36,64,0.28);
+  --shadow-float: 0 16px 36px rgba(20,27,46,0.13);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  font-family: var(--font-ui);
+  color: var(--ink);
+}
+
+@keyframes yoPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(47,107,255,0.18); }
+  50% { box-shadow: 0 0 0 4px rgba(47,107,255,0.18); }
+}
+@keyframes yoBelt {
+  from { background-position: 0 0; }
+  to { background-position: -28px 0; }
+}
+@keyframes yoBob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+@keyframes yoBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes yoDash {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -16; }
+}
+
+.yo-pulse { animation: yoPulse 1.4s ease-in-out infinite; }
+.yo-blink { animation: yoBlink 1.1s ease-in-out infinite; }
+.yo-bob { animation: yoBob 1.6s ease-in-out infinite; }
+.yo-belt {
+  animation: yoBelt 0.6s linear infinite;
+}
+.yo-dash { animation: yoDash 0.9s linear infinite; }

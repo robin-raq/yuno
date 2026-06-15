@@ -1116,6 +1116,29 @@ python3 -m pytest tests/ -q
 
 ---
 
+### Story: S2-REM — Remittance Comparison workflow (Phase E: U11 frontend canvas mock sync)
+**Date:** 2026-06-14
+**Status:** [ ] In Progress  [x] Complete  [ ] Blocked
+
+> Plan source: `docs/plans/2026-06-14-001-feat-remittance-comparison-workflow-plan.md` (U11).
+
+#### AI Tools and Models Used
+- Claude via Cursor — ce-work; ported Canvas/screens from `feat/frontend-design-foundation` via path checkout (no merge); aligned `mockData.ts` winner/telegram with U7 (MoneyGram).
+
+#### Important Prompts and Key Decisions
+- Remittance template is default tab: Research → Compliance → Analyst (no Publisher).
+- FLAGGED exit rendered as dashed red stub (no false solid edge — KTD2 end-node fallthrough).
+- Analyst→END shown as dashed `RECOMMENDATION ⤳ done` fallthrough, not a seeded ALWAYS edge.
+- RunView cleared scenario banner/events derive winner from `REMITTANCE_CLEARED.winner`.
+
+#### Verification (U11 checklist)
+- [x] `npx tsc --noEmit` clean in `frontend/`
+- [x] Both templates (remittance + dev) in Canvas tabs
+- [x] FLAGGED path represented without false edge
+- [x] Mock payoff matches U7 ($500 cash → MoneyGram recommendation)
+
+---
+
 ### Story: S3 — Live Telegram channel
 **Date:** _(fill in)_
 **Status:** [ ] In Progress  [ ] Complete  [ ] Blocked
