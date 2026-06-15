@@ -12,14 +12,31 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 
 from app.database import engine, init_db
+from app.domain.remittance.types import ROUTE_ANALYST_NEEDS_MORE_DATA, ROUTE_COMPLIANCE_CLEARED
 from app.models import (
-    agents, agent_config, memory_entries, skills,
-    workflows, workflow_nodes, workflow_edges,
+    agents,
+    agent_config,
+    channel_connections,
+    memory_entries,
+    skills,
+    workflow_edges,
+    workflow_nodes,
+    workflows,
 )
 from sqlalchemy import insert, select
-
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 GOOSE_MODEL = os.getenv("GOOSE_MODEL", "claude-sonnet-4-5")
+
+# max_cost_per_run is deferred — no agent_config column yet (S4).
+
+_DEFAULT_GUARDRAILS = {
+    "max_tokens_per_run": 50000,
+    "max_runs_per_minute": 6,
+    "max_feedback_iterations": 2,
+    "max_turns": 10,
+    "timeout_seconds": 180,
+}
 
 SEED_AGENTS = [
     {
@@ -54,147 +71,199 @@ SEED_AGENTS = [
         "requires_approval": True,
     },
     {
-        "name": "Researcher",
-        "role": "Research analyst",
-        "system_prompt": "You gather information and produce structured research reports.",
+        "name": "Research",
+        "role": "Remittance researcher",
+        "system_prompt": (
+            "You gather money-transfer provider quotes for a remittance request. "
+            "Parse the user's request, load fixture rates when live lookup is unavailable, "
+            "and return a structured TransferBrief JSON with data_source labeled."
+        ),
         "model": GOOSE_MODEL,
         "extensions": ["developer"],
         "memory": [
-            {"key": "report_format", "value": "Markdown with executive summary"},
-            {"key": "sources", "value": "Prefer primary sources; cite everything"},
+            {"key": "sender_city", "value": "Austin, TX"},
+            {"key": "sender_country", "value": "US"},
+            {"key": "recipient_country", "value": "Colombia"},
+            {"key": "recipient_city", "value": "Bogotá"},
+            {"key": "send_currency", "value": "USD"},
+            {"key": "receive_currency", "value": "COP"},
         ],
-        "channels": [{"channel_type": "telegram", "channel_id": os.getenv("DEMO_TELEGRAM_CHAT_ID", "0")}],
+    },
+    {
+        "name": "Compliance",
+        "role": "Compliance screening (deterministic)",
+        "system_prompt": (
+            "Deterministic compliance screening runs outside this prompt via ComplianceAdapter. "
+            "This agent exists for workflow graph wiring and documentary memory only."
+        ),
+        "model": GOOSE_MODEL,
+        "extensions": ["developer"],
+        "memory": [],
     },
     {
         "name": "Analyst",
-        "role": "Data analyst",
-        "system_prompt": "You analyse research findings and produce actionable insights.",
+        "role": "Remittance analyst",
+        "system_prompt": (
+            "You score providers, write reports/transfer_comparison.md, and produce Telegram-ready "
+            "recommendation text. Reply ANALYST=NEEDS_MORE_DATA with missing field names when "
+            "provider data is incomplete; otherwise emit ANALYST=RECOMMENDATION with the winner."
+        ),
         "model": GOOSE_MODEL,
         "extensions": ["developer"],
         "memory": [],
-    },
-    {
-        "name": "Publisher",
-        "role": "Content publisher",
-        "system_prompt": "You format and publish content. Reply NEEDS_MORE_DATA if the content is insufficient.",
-        "model": GOOSE_MODEL,
-        "extensions": ["developer"],
-        "memory": [],
+        "max_feedback_iterations": 2,
     },
 ]
+
+
+async def populate_seed(conn: AsyncConnection | AsyncSession) -> None:
+    """Insert demo agents and workflow templates if the database is empty."""
+    result = await conn.execute(select(agents))
+    if result.fetchone():
+        return
+
+    agent_ids: dict[str, str] = {}
+
+    for agent in SEED_AGENTS:
+        aid = str(uuid.uuid4())
+        agent_ids[agent["name"]] = aid
+        await conn.execute(insert(agents).values(
+            id=aid,
+            name=agent["name"],
+            role=agent["role"],
+            system_prompt=agent["system_prompt"],
+            model=agent["model"],
+            status="active",
+        ))
+        guardrails = {**_DEFAULT_GUARDRAILS}
+        if "max_feedback_iterations" in agent:
+            guardrails["max_feedback_iterations"] = agent["max_feedback_iterations"]
+        await conn.execute(insert(agent_config).values(
+            id=str(uuid.uuid4()),
+            agent_id=aid,
+            extensions=json.dumps(agent.get("extensions", ["developer"])),
+            requires_approval=1 if agent.get("requires_approval") else 0,
+            **guardrails,
+        ))
+        for entry in agent.get("memory", []):
+            await conn.execute(insert(memory_entries).values(
+                id=str(uuid.uuid4()),
+                agent_id=aid,
+                key=entry["key"],
+                value=entry["value"],
+            ))
+
+    # Template 1: Dev Pipeline — Coder → Reviewer → (REJECTED loop | APPROVED → Deployer)
+    dp_id = str(uuid.uuid4())
+    await conn.execute(insert(workflows).values(
+        id=dp_id,
+        name="Dev Pipeline",
+        description="Coder writes code, Reviewer approves or sends back, Deployer deploys.",
+        template_key="dev_pipeline",
+    ))
+    n_coder = str(uuid.uuid4())
+    n_reviewer = str(uuid.uuid4())
+    n_deployer = str(uuid.uuid4())
+    for node_id, agent_name, ntype, px, py, prompt in [
+        (n_coder, "Coder", "start", 0, 0, "Implement the requested feature."),
+        (n_reviewer, "Reviewer", "middle", 300, 0, "Review the code produced by the Coder."),
+        (n_deployer, "Deployer", "end", 600, 0, "Deploy the approved code."),
+    ]:
+        await conn.execute(insert(workflow_nodes).values(
+            id=node_id,
+            workflow_id=dp_id,
+            agent_id=agent_ids[agent_name],
+            node_type=ntype,
+            task_prompt=prompt,
+            position_x=px,
+            position_y=py,
+        ))
+    await conn.execute(insert(workflow_edges).values(
+        id=str(uuid.uuid4()), from_node_id=n_coder, to_node_id=n_reviewer, condition="always",
+    ))
+    await conn.execute(insert(workflow_edges).values(
+        id=str(uuid.uuid4()), from_node_id=n_reviewer, to_node_id=n_coder,
+        condition="REJECTED", max_iterations=2,
+    ))
+    await conn.execute(insert(workflow_edges).values(
+        id=str(uuid.uuid4()), from_node_id=n_reviewer, to_node_id=n_deployer, condition="APPROVED",
+    ))
+
+    # Template 2: Remittance Comparison — Research → Compliance → Analyst
+    rc_id = str(uuid.uuid4())
+    await conn.execute(insert(workflows).values(
+        id=rc_id,
+        name="Remittance Comparison",
+        description=(
+            "Research gathers provider quotes, Compliance screens deterministically, "
+            "Analyst scores and recommends."
+        ),
+        template_key="remittance_comparison",
+    ))
+    n_research = str(uuid.uuid4())
+    n_compliance = str(uuid.uuid4())
+    n_analyst = str(uuid.uuid4())
+    for node_id, agent_name, ntype, px, py, prompt in [
+        (
+            n_research,
+            "Research",
+            "start",
+            0,
+            0,
+            "Gather provider quotes for the remittance request and return TransferBrief JSON.",
+        ),
+        (
+            n_compliance,
+            "Compliance",
+            "end",
+            300,
+            0,
+            "Screen the transfer brief against compliance rules.",
+        ),
+        (
+            n_analyst,
+            "Analyst",
+            "end",
+            600,
+            0,
+            "Score providers, write the comparison report, and produce the recommendation message.",
+        ),
+    ]:
+        await conn.execute(insert(workflow_nodes).values(
+            id=node_id,
+            workflow_id=rc_id,
+            agent_id=agent_ids[agent_name],
+            node_type=ntype,
+            task_prompt=prompt,
+            position_x=px,
+            position_y=py,
+        ))
+    await conn.execute(insert(workflow_edges).values(
+        id=str(uuid.uuid4()), from_node_id=n_research, to_node_id=n_compliance, condition="always",
+    ))
+    await conn.execute(insert(workflow_edges).values(
+        id=str(uuid.uuid4()), from_node_id=n_compliance, to_node_id=n_analyst,
+        condition=ROUTE_COMPLIANCE_CLEARED,
+    ))
+    await conn.execute(insert(workflow_edges).values(
+        id=str(uuid.uuid4()), from_node_id=n_analyst, to_node_id=n_research,
+        condition=ROUTE_ANALYST_NEEDS_MORE_DATA, max_iterations=2,
+    ))
+
+    await conn.execute(insert(channel_connections).values(
+        id=str(uuid.uuid4()),
+        agent_id=agent_ids["Research"],
+        channel_type="telegram",
+        channel_id=os.getenv("DEMO_TELEGRAM_CHAT_ID", "0"),
+        trigger_workflow_id=rc_id,
+        active=1,
+    ))
 
 
 async def seed() -> None:
     await init_db()
     async with engine.begin() as conn:
-        # Check if already seeded
-        result = await conn.execute(select(agents))
-        if result.fetchone():
-            print("  DB already seeded — skipping")
-            return
-
-        agent_ids: dict[str, str] = {}
-
-        for a in SEED_AGENTS:
-            aid = str(uuid.uuid4())
-            agent_ids[a["name"]] = aid
-            await conn.execute(insert(agents).values(
-                id=aid,
-                name=a["name"],
-                role=a["role"],
-                system_prompt=a["system_prompt"],
-                model=a["model"],
-                status="active",
-            ))
-            await conn.execute(insert(agent_config).values(
-                id=str(uuid.uuid4()),
-                agent_id=aid,
-                extensions=json.dumps(a.get("extensions", ["developer"])),
-                requires_approval=1 if a.get("requires_approval") else 0,
-            ))
-            for m in a.get("memory", []):
-                await conn.execute(insert(memory_entries).values(
-                    id=str(uuid.uuid4()),
-                    agent_id=aid,
-                    key=m["key"],
-                    value=m["value"],
-                ))
-
-        # Template 1: Dev Pipeline — Coder → Reviewer → (REJECTED loop | APPROVED → Deployer)
-        dp_id = str(uuid.uuid4())
-        await conn.execute(insert(workflows).values(
-            id=dp_id,
-            name="Dev Pipeline",
-            description="Coder writes code, Reviewer approves or sends back, Deployer deploys.",
-            template_key="dev_pipeline",
-        ))
-        n_coder = str(uuid.uuid4())
-        n_reviewer = str(uuid.uuid4())
-        n_deployer = str(uuid.uuid4())
-        for node_id, agent_name, ntype, px, py, prompt in [
-            (n_coder, "Coder", "start", 0, 0, "Implement the requested feature."),
-            (n_reviewer, "Reviewer", "middle", 300, 0, "Review the code produced by the Coder."),
-            (n_deployer, "Deployer", "end", 600, 0, "Deploy the approved code."),
-        ]:
-            await conn.execute(insert(workflow_nodes).values(
-                id=node_id,
-                workflow_id=dp_id,
-                agent_id=agent_ids[agent_name],
-                node_type=ntype,
-                task_prompt=prompt,
-                position_x=px,
-                position_y=py,
-            ))
-        await conn.execute(insert(workflow_edges).values(
-            id=str(uuid.uuid4()), from_node_id=n_coder, to_node_id=n_reviewer, condition="always",
-        ))
-        # Loop: REJECTED → back to Coder (max 2 iterations)
-        await conn.execute(insert(workflow_edges).values(
-            id=str(uuid.uuid4()), from_node_id=n_reviewer, to_node_id=n_coder,
-            condition="REJECTED", max_iterations=2,
-        ))
-        # Forward: APPROVED → Deployer
-        await conn.execute(insert(workflow_edges).values(
-            id=str(uuid.uuid4()), from_node_id=n_reviewer, to_node_id=n_deployer, condition="APPROVED",
-        ))
-
-        # Template 2: Research Pipeline — Researcher → Analyst → Publisher
-        rp_id = str(uuid.uuid4())
-        await conn.execute(insert(workflows).values(
-            id=rp_id,
-            name="Research Pipeline",
-            description="Researcher gathers data, Analyst processes it, Publisher formats and delivers.",
-            template_key="research_pipeline",
-        ))
-        n_researcher = str(uuid.uuid4())
-        n_analyst = str(uuid.uuid4())
-        n_publisher = str(uuid.uuid4())
-        for node_id, agent_name, ntype, px, py, prompt in [
-            (n_researcher, "Researcher", "start", 0, 0, "Research the given topic thoroughly."),
-            (n_analyst, "Analyst", "middle", 300, 0, "Analyse the research findings."),
-            (n_publisher, "Publisher", "end", 600, 0, "Publish the analysis. Reply NEEDS_MORE_DATA if insufficient."),
-        ]:
-            await conn.execute(insert(workflow_nodes).values(
-                id=node_id,
-                workflow_id=rp_id,
-                agent_id=agent_ids[agent_name],
-                node_type=ntype,
-                task_prompt=prompt,
-                position_x=px,
-                position_y=py,
-            ))
-        await conn.execute(insert(workflow_edges).values(
-            id=str(uuid.uuid4()), from_node_id=n_researcher, to_node_id=n_analyst, condition="always",
-        ))
-        await conn.execute(insert(workflow_edges).values(
-            id=str(uuid.uuid4()), from_node_id=n_analyst, to_node_id=n_publisher, condition="always",
-        ))
-        # Loop: NEEDS_MORE_DATA → back to Researcher
-        await conn.execute(insert(workflow_edges).values(
-            id=str(uuid.uuid4()), from_node_id=n_publisher, to_node_id=n_researcher,
-            condition="NEEDS_MORE_DATA", max_iterations=2,
-        ))
-
+        await populate_seed(conn)
     print(f"  Seeded {len(SEED_AGENTS)} agents and 2 workflow templates.")
 
 

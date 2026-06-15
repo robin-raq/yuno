@@ -1032,6 +1032,28 @@ python3 -m pytest tests/ -q
 
 ---
 
+### Story: S2-REM — Remittance Comparison workflow (Phase D: U8 seed replacement)
+**Date:** 2026-06-14
+**Status:** [ ] In Progress  [x] Complete  [ ] Blocked
+
+> Plan source: `docs/plans/2026-06-14-001-feat-remittance-comparison-workflow-plan.md` (U8).
+
+#### AI Tools and Models Used
+- Claude via Cursor — ce-work execution; test-first `test_seed_remittance.py`, then `populate_seed` refactor.
+
+#### Important Prompts and Key Decisions
+- Replaced Research Pipeline with Remittance Comparison; removed Publisher; Researcher → Research.
+- Added Compliance agent; KTD6 edge conditions from `types.py` sentinels.
+- Channel connection on Research → `trigger_workflow_id` = remittance workflow.
+- Extracted `populate_seed(conn)` for testability; `seed()` wraps init_db + engine.begin.
+- Dev Pipeline untouched; guardrails seeded from existing columns (max_cost_per_run deferred).
+
+#### TDD Evidence (U8)
+- 7 tests in `test_seed_remittance.py`.
+- Full suite: `pytest tests/ -q` → 181 passed, 1 skipped.
+
+---
+
 ### Story: S2-REM — Remittance Comparison workflow (Phase C: U12 loop-back input threading)
 **Date:** 2026-06-14
 **Status:** [ ] In Progress  [x] Complete  [ ] Blocked
