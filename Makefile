@@ -2,7 +2,7 @@
 
 GOOSE_PORT ?= 3284
 GOOSE_HOST ?= 127.0.0.1
-BACKEND_PORT ?= 8000
+BACKEND_PORT ?= 8001
 FRONTEND_PORT ?= 5173
 
 # ── One-time setup ────────────────────────────────────────────────────────────
@@ -27,7 +27,7 @@ dev: _preflight
 	@sleep 2
 	@echo "==> Starting FastAPI backend on :$(BACKEND_PORT)"
 	@set -a && . ./.env && set +a && \
-	cd backend && GOOSE_PORT=$(GOOSE_PORT) python3 -m uvicorn app.main:app --host 0.0.0.0 --port $(BACKEND_PORT) --reload &
+	cd backend && GOOSE_PORT=$(GOOSE_PORT) python3 -m uvicorn app.main:app --host 0.0.0.0 --port $${BACKEND_PORT:-8001} --reload &
 	@sleep 1
 	@echo "==> Starting Vite frontend on :$(FRONTEND_PORT)"
 	cd frontend && npm run dev &
@@ -45,6 +45,12 @@ _preflight:
 	@echo "==> Preflight: checking .env"
 	@test -f .env || (echo "ERROR: .env missing. Run: cp .env.example .env and fill in ANTHROPIC_API_KEY" && exit 1)
 	@grep -q '^ANTHROPIC_API_KEY=sk-ant-' .env 2>/dev/null || echo "WARN: ANTHROPIC_API_KEY may not be set — smoke gate will fail"
+	@echo "==> Preflight: checking port $(BACKEND_PORT) is free for Yuno API"
+	@if curl -sf "http://localhost:$(BACKEND_PORT)/health" 2>/dev/null | grep -q '"status":"ok"'; then \
+		echo "  Yuno API already running on :$(BACKEND_PORT)"; \
+	elif curl -sf "http://localhost:$(BACKEND_PORT)/health" 2>/dev/null | grep -q .; then \
+		echo "ERROR: port $(BACKEND_PORT) is in use by another app (not Yuno). Set BACKEND_PORT=8001 in .env or stop the other process."; exit 1; \
+	fi
 
 # ── Smoke gate (AC-4) ─────────────────────────────────────────────────────────
 smoke-goose:

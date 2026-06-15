@@ -76,8 +76,16 @@ export default function LiveRunView() {
         const dev = wfs.find((w) => w.template_key === 'dev_pipeline')
         setWorkflowId(dev?.id ?? wfs[0]?.id ?? '')
         setAgentNames(Object.fromEntries(agents.map((a) => [a.id, a.name])))
+        if (wfs.length === 0) {
+          setError('No workflows in database — run: cd backend && python3 -m scripts.seed_db')
+        }
       })
-      .catch((e: Error) => setError(e.message))
+      .catch((e: Error) => {
+        const msg = e.message === 'Not Found'
+          ? 'Yuno API not found — run make dev (or set BACKEND_PORT / VITE_API_TARGET in .env; default is :8001)'
+          : e.message
+        setError(msg)
+      })
   }, [])
 
   useEffect(() => {
