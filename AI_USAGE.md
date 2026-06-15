@@ -1094,6 +1094,28 @@ python3 -m pytest tests/ -q
 
 ---
 
+### Story: S2-REM — Remittance Comparison workflow (Phase E: U10 README + BUILD_SPEC)
+**Date:** 2026-06-14
+**Status:** [ ] In Progress  [x] Complete  [ ] Blocked
+
+> Plan source: `docs/plans/2026-06-14-001-feat-remittance-comparison-workflow-plan.md` (U10).
+
+#### AI Tools and Models Used
+- Claude via Cursor — ce-work; BUILD_SPEC first, README second; examples cross-checked against `analyst.analyze` + `compliance.screen_from_dict`.
+
+#### Important Prompts and Key Decisions
+- Demo beats 5–6 realigned to Remittance Comparison; primary path pinned to single-pass CLEARED → RECOMMENDATION.
+- §15 outbound send point fixed (terminal node, not Publisher); trigger prefix `run remittance:`.
+- README Remittance section with bold compliance disclaimer; implemented vs deferred table (S3 Telegram).
+
+#### Verification (U10 checklist)
+- [x] README Remittance subsection with disclaimer, architecture, scoring, examples, limitations
+- [x] Examples match actual U7/U4 output shapes (MoneyGram recommendation; $3500 FLAGGED)
+- [x] BUILD_SPEC beats 5–6 reference remittance; research_pipeline marked superseded
+- [x] No secrets in examples
+
+---
+
 ### Story: S3 — Live Telegram channel
 **Date:** _(fill in)_
 **Status:** [ ] In Progress  [ ] Complete  [ ] Blocked

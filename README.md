@@ -158,14 +158,93 @@ The platform fails loudly if Goose is unreachable — there is no non-Goose fall
 
 The recorded demo follows eight beats:
 
-1. **Agents page** — six seeded agents with five config dimensions each; Telegram channel badge on Research
-2. **Edit memory live** — edit a Research agent memory fact (visible in beat 8)
+1. **Agents page** — six seeded agents (Coder, Reviewer, Deployer, Research, Compliance, Analyst) with five config dimensions each; Telegram channel badge on Research
+2. **Edit memory live** — edit a Research agent memory fact (corridor default, visible in beat 8)
 3. **Builder-modification** — load Dev Pipeline template, edit an edge condition, bump loop max-iterations, swap a node, save as new workflow
 4. **Run + approval** — run the modified pipeline; watch tool calls; REJECTED loop fires once; APPROVED; Deployer approval gate pauses the run; click Approve; run completes with token totals
-5. **Research Pipeline** — load template; inspect Analyst's skill steps
-6. **Telegram trigger** — send `run research: Acme Payments Ltd — $50k limit increase`; watch agents execute; phone buzzes with result
+5. **Remittance Comparison** — load `remittance_comparison` template; inspect Research → Compliance → Analyst graph with KTD6 sentinel edges
+6. **Telegram trigger (primary path)** — send `run remittance: $500 cash to Bogotá`; watch Research → Compliance CLEARED → Analyst RECOMMENDATION in one clean pass; phone buzzes with the recommendation summary
 7. **Expand run row** — full conversation trail, tool calls, per-task tokens
 8. **Conversational memory** — send a plain Telegram message; reply reflects the edited memory fact
+
+---
+
+## Remittance Comparison Workflow
+
+**Demo rules engine only — not legal or regulatory compliance advice.**
+
+Three-role pipeline replacing the old Research Pipeline template: **Research** gathers provider quotes, **Compliance** runs deterministic rules screening (no scoring, no recommendations), **Analyst** scores providers, writes `reports/transfer_comparison.md`, and produces Telegram-ready text.
+
+### Why Compliance is separate
+
+Compliance is a **scripted adapter** (`ComplianceAdapter`) behind the same `AgentRuntimeAdapter` ABC as Goose — it runs the rules engine in pure Python with `tokens_total=0`. The Analyst never runs on a FLAGGED transfer. This separation keeps screening deterministic and testable; it is a **demo rules engine**, not legal advice.
+
+### Data sources
+
+- **Fixture mode (default in tests and offline demo):** Research loads `backend/fixtures/transfer_fixture.json` and labels `data_source: "fixture"`. Live rates are never invented.
+- **Live mode (Goose Research agent):** Research may call `read_file` on the fixture or a future live hook; `data_source` is labeled accordingly. Correctness in unit/integration tests never depends on the LLM.
+
+### Routing tokens (KTD6)
+
+Graph edges match **anchored sentinels** on line 1 of agent output — e.g. `COMPLIANCE=CLEARED`, `COMPLIANCE=FLAGGED`, `ANALYST=RECOMMENDATION`, `ANALYST=NEEDS_MORE_DATA` — not bare words like `CLEARED` (which would substring-match inside FLAGGED issue prose and fail open).
+
+### Scoring model (Analyst)
+
+Weighted min-max normalization: **50%** recipient value (`cop_received`), **30%** location convenience (cash sends only), **20%** speed. Digital sends equalize the location term. Tie-break: higher `cop_received`.
+
+### Telegram integration
+
+| Status | Detail |
+|---|---|
+| **Implemented (U1–U9)** | Seed graph, domain logic, Compliance adapter, worker routing, terminal output contracts, deterministic tests |
+| **Deferred (S3)** | Inbound poller routing on `run remittance:` prefix, outbound `bot.send_message` on terminal completion, `channel_outbound` persistence |
+
+The Research agent's `channel_connections` row points `trigger_workflow_id` at the remittance workflow. Outbound send is owned by the platform worker (not a Goose tool).
+
+### Worked example — cleared ($500 cash, Austin → Bogotá)
+
+**Request (Telegram):**
+```
+run remittance: $500 cash to Bogotá
+```
+
+**Terminal response (Analyst `telegram_message`):**
+```
+RECOMMENDATION: MoneyGram
+Fee $9.99 · Rate 4,155 COP/USD · You receive 2,035,992 COP
+Pickup: Walmart Supercenter, 3.8 mi (Daily 7am-11pm)
+Runner-up: Western Union — $3.00 higher fee but 25 COP/USD better rate
+Full report: reports/transfer_comparison.md
+```
+
+### Worked example — FLAGGED ($3500 AML threshold)
+
+**Request:**
+```
+run remittance: $3500 cash to Bogotá
+```
+
+**Terminal response (Compliance output; Analyst never runs):**
+```
+COMPLIANCE=FLAGGED
+Cash send amount $3500 exceeds the configured $3000 AML reporting threshold.
+```
+
+*(S3 may wrap this in a user-facing alert; the routing sentinel stays on line 1.)*
+
+### Known limitations
+
+- No real OFAC/sanctions feed — rules come from `backend/fixtures/compliance_rules.json` only
+- No live-rate guarantee — fixture data is clearly labeled demo pricing
+- **Sender `previously_flagged` is LLM-asserted in live mode** — Research authors the brief; Compliance fail-closes if the field is missing, but cannot detect a hallucinated `false`
+- `sender_profile` PII is not redacted in logs or reports
+- Per-run cost guardrails deferred (no `max_cost_per_run` column yet)
+
+### Production hardening notes
+
+- Wire authoritative sender KYC from an identity store into the brief (not agent memory)
+- Replace substring edge matching with anchored parsing at the orchestrator layer
+- Add real compliance data feeds and legal review before any production use
 
 ---
 
@@ -174,11 +253,11 @@ The recorded demo follows eight beats:
 > Tests are created during implementation. This section will be updated to show actual commands and results.
 
 ```bash
-# Run the default test suite (8 files — three critical-path tests + must-have behaviors)
-pytest
+# Run the default test suite (remittance + workflow + agent tests)
+cd backend && pytest
 
 # Run the opt-in live Goose integration test (requires ANTHROPIC_API_KEY and running goose serve)
-pytest -m live
+cd backend && pytest -m live
 ```
 
 **Critical-path tests (AC-3):**
@@ -203,8 +282,8 @@ pytest -m live
 1. Design your workflow as a directed graph: identify agent nodes and conditional edges
 2. Insert rows into `workflows`, `workflow_nodes`, and `workflow_edges` (or duplicate an existing workflow via `POST /workflows/{id}/duplicate` and edit in the builder)
 3. Set `template_key` to a unique string if the template should appear in the Load Template picker
-4. Edge `condition` values are free-form substring-match strings (e.g. `"APPROVED"`, `"NEEDS_MORE_DATA"`, `"always"`)
-5. Loop edges point a `to_node_id` back to an already-executed node; set `max_iterations` to cap the loop
+4. Edge `condition` values are free-form substring-match strings (e.g. `"APPROVED"`, `"always"`). Remittance template uses KTD6 sentinels: `COMPLIANCE=CLEARED`, `ANALYST=NEEDS_MORE_DATA`.
+5. Loop edges point a `to_node_id` back to an earlier node in the seeded layout; set `max_iterations` to cap the loop
 
 ---
 

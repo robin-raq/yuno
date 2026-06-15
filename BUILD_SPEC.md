@@ -93,7 +93,7 @@ These are binding. None may be silently cut or narrowed.
 
 **ChannelConnection** — `id`, `agent_id`, `channel_type` (default `telegram`), `channel_id` (Telegram chat_id), `trigger_workflow_id` (nullable), `active` (bool). `(channel_type, channel_id)` unique.
 
-**Workflow** — `id`, `name`, `description`, `template_key` (nullable; `dev_pipeline`|`research_pipeline`|NULL for user-created).
+**Workflow** — `id`, `name`, `description`, `template_key` (nullable; `dev_pipeline`|`remittance_comparison`|NULL for user-created). The former `research_pipeline` key is **superseded** by `remittance_comparison` (U8 seed).
 
 **WorkflowNode** — `id`, `workflow_id`, `agent_id`, `node_type` (`start`|`middle`|`end`), `task_prompt`, `position_x`, `position_y`.
 
@@ -703,7 +703,7 @@ For every inbound Telegram update:
 
 1. Persist a `channel_inbound` `agent_messages` row immediately (trail always consistent)
 2. Route to **exactly one** of:
-   - **Workflow trigger:** text starts with the connection's `trigger_prefix` (seeded: `run research:`) → strip prefix → `start_workflow_run(trigger_workflow_id, input=remainder)`
+   - **Workflow trigger:** text starts with the connection's `trigger_prefix` (seeded: `run remittance:`) → strip prefix → `start_workflow_run(trigger_workflow_id, input=remainder)`
    - **Conversational reply:** all other text → enqueue a single-agent task (`source='conversational'`, `run_id`/`node_id` NULL) with the connected agent's fully assembled context (persona + memory + skills)
 
 No message is processed by both paths. This eliminates v1's double-execution risk.
@@ -711,7 +711,7 @@ No message is processed by both paths. This eliminates v1's double-execution ris
 ### Outbound Responses
 
 - **Conversational path:** the worker calls `bot.send_message(chat_id, reply)` after the task completes; persists a `channel_outbound` `agent_messages` row
-- **Workflow trigger path:** the worker sends via `bot.send_message` after the Publisher node completes; persists a `channel_outbound` row
+- **Workflow trigger path:** the worker sends via `bot.send_message` after the **terminal node** completes — Analyst `ANALYST=RECOMMENDATION` (cleared path) or Compliance `COMPLIANCE=FLAGGED` (rejected path). There is no Publisher node; both terminals are valid demo outcomes. Persists a `channel_outbound` row. *(S3 implements the poller + outbound send; U1–U9 define the terminal output contract.)*
 - There is no Telegram tool inside Goose for sending messages (spike §6 — no such builtin exists); the platform's worker owns all outbound sends
 
 ### Offline Contingency
@@ -887,12 +887,22 @@ Two documented commands. No interactive steps. Verified Day-2 morning.
 
 ### 20.1 Eight-Beat Sequence
 
-1. Open `http://localhost:5173`. Agents page shows six seeded agents (Coder, Reviewer, Deployer, Research, Analyst, Publisher), each with its five config dimensions and a Telegram channel badge on Research.
-2. Open the Research agent — show memory entries (`risk_framework`, `platform_context`), a skill, guardrails, and the approval toggle. **Edit one memory entry live** (sets up beat 8).
+1. Open `http://localhost:5173`. Agents page shows six seeded agents (Coder, Reviewer, Deployer, Research, Compliance, Analyst), each with its five config dimensions and a Telegram channel badge on Research.
+2. Open the Research agent — show memory entries (corridor defaults: `sender_city`, `recipient_city`, currencies), guardrails, and the approval toggle. **Edit one memory entry live** (sets up beat 8).
 3. **Builder-modification beat (AC-2):** load the **Dev Pipeline** template onto the React Flow canvas; change the Reviewer→Coder edge condition text, bump the loop's max iterations, swap one node's agent, save as a new workflow.
 4. **Run + approval beat:** run the modified dev pipeline. Watch the live run view: `task_started`, real `tool_call` events (Coder writes a file via the `developer` extension), `message_sent` Coder→Reviewer, the REJECTED loop firing once, then APPROVED — run **pauses with `approval_required`** before the Deployer node (Deployer is seeded `requires_approval=true`). Click **Approve** in the UI; run resumes to `workflow_completed` with token/cost totals from Goose's native usage reporting.
-5. Load the **Research Pipeline** template. Note the Analyst's skill steps visible in its config.
-6. **Trigger-phrase beat:** open Telegram, send `run research: Acme Payments Ltd — $50k limit increase`. Watch the run view: Research → Analyst, a NEEDS_MORE_DATA feedback iteration, then RISK_SCORE → Publisher; the worker sends the Telegram summary; phone buzzes.
+5. Load the **Remittance Comparison** template (`template_key=remittance_comparison`). Note the three-node graph: Research (start) → Compliance → Analyst, with KTD6 sentinel edge conditions (`COMPLIANCE=CLEARED`, `ANALYST=NEEDS_MORE_DATA` loop). *(The old **Research Pipeline** template is superseded.)*
+6. **Trigger-phrase beat (primary recorded path):** open Telegram, send `run remittance: $500 cash to Bogotá`. Watch the run view: Research → Compliance (`COMPLIANCE=CLEARED`) → Analyst (`ANALYST=RECOMMENDATION`) in a **single clean pass** — no NEEDS_MORE_DATA loop, `forced_complete=false`. The worker sends the Telegram recommendation summary; phone buzzes. Expected terminal message shape:
+   ```
+   RECOMMENDATION: MoneyGram
+   Fee $9.99 · Rate 4,155 COP/USD · You receive 2,035,992 COP
+   Pickup: Walmart Supercenter, 3.8 mi (Daily 7am-11pm)
+   Runner-up: Western Union — $3.00 higher fee but 25 COP/USD better rate
+   Full report: reports/transfer_comparison.md
+   ```
+   **Secondary recorded beats (capability demos, not the primary path):**
+   - **FLAGGED stop:** `run remittance: $3500 cash to Bogotá` — Compliance returns `COMPLIANCE=FLAGGED`; Analyst never runs; terminal output is the issue text. *(Demo rules engine — not legal/regulatory compliance.)* Example: `Cash send amount $3500 exceeds the configured $3000 AML reporting threshold.`
+   - **NEEDS_MORE_DATA loop:** a brief missing provider rates triggers `ANALYST=NEEDS_MORE_DATA` → targeted re-request loop (max 2) → eventual `RECOMMENDATION` or `forced_complete` cap.
 7. Expand the run's row: full conversation trail — every inter-agent message, the inbound Telegram message with source badge, tool calls, per-task tokens.
 8. **Memory beat (AC-5):** send a plain conversational message to the Research agent in Telegram (no trigger prefix) — the reply observably reflects the memory fact edited in beat 2. This is a run-less task (`source='conversational'`): the monitor shows it under the agent rather than under a run.
 
@@ -905,7 +915,7 @@ Two documented commands. No interactive steps. Verified Day-2 morning.
 
 ### 20.3 Primary Path vs Contingency
 
-The primary recorded path must **not** depend on `forced_complete=true` as the normal completion mechanism — `forced_complete` demonstrates a capability, not the happy path. The dev-pipeline demo shows one REJECTED iteration and then an APPROVED outcome (normal completion) before the Deployer approval gate.
+The primary recorded path must **not** depend on `forced_complete=true` as the normal completion mechanism — `forced_complete` demonstrates a capability, not the happy path. The dev-pipeline demo shows one REJECTED iteration and then an APPROVED outcome (normal completion) before the Deployer approval gate. The **remittance primary path** (beat 6) is pinned to a single-pass CLEARED → RECOMMENDATION completion with `forced_complete=false`; FLAGGED-stop and NEEDS_MORE_DATA-loop are secondary capability beats.
 
 ### 20.4 Rehearsal Gate
 
@@ -927,7 +937,7 @@ A story is done when all of the following are true:
 The full submission is done when:
 
 - [ ] All AC-1 through AC-8 satisfied
-- [ ] Full test suite green (8 files)
+- [ ] Full test suite green (`cd backend && pytest`)
 - [ ] `pytest -m live` passes at least once on demo morning
 - [ ] All manual Day-2 checklist items checked
 - [ ] Fresh-clone `make setup && make dev` verified
@@ -1118,15 +1128,15 @@ sequenceDiagram
     participant WORKER as Worker Loop
     participant SSE as SSE Endpoint
 
-    Human->>TG_API: "run research: Acme Payments — $50k limit"
+    Human->>TG_API: "run remittance: $500 cash to Bogotá"
     POLLER->>TG_API: getUpdates (long poll, timeout=30s)
     TG_API-->>POLLER: Update {chat_id, text}
     POLLER->>DB: lookup channel_connections by chat_id → Research agent
     POLLER->>DB: INSERT agent_messages {type=channel_inbound} (always first)
 
-    alt text starts with trigger prefix "run research:"
-        POLLER->>ORCH: start_workflow_run(research_pipeline, input="Acme Payments...")
-        Note over ORCH,WORKER: Research → Analyst → Publisher agents execute via Worker
+    alt text starts with trigger prefix "run remittance:"
+        POLLER->>ORCH: start_workflow_run(remittance_comparison, input="$500 cash to Bogotá")
+        Note over ORCH,WORKER: Research → Compliance (scripted) → Analyst agents execute via Worker
         WORKER->>TG_API: bot.send_message(chat_id, summary)
         WORKER->>DB: INSERT agent_messages {type=channel_outbound}
         WORKER->>SSE: emit message_sent {type=channel_outbound, source_badge=telegram}
