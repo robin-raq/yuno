@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import './styles/tokens.css'
 import Dashboard from './screens/Dashboard'
-import RunView from './screens/RunView'
+import LiveRunView from './screens/LiveRunView'
 import Gallery from './screens/Gallery'
 import Builder from './screens/Builder'
 import Canvas from './screens/Canvas'
@@ -17,7 +17,7 @@ const NAV_LINKS: [Screen, string][] = [
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('dashboard')
-  const [selectedRunId, setSelectedRunId] = useState<string>('run-1042')
+  const [, setSelectedRunId] = useState<string>('')
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg)', fontFamily: 'var(--font-ui)', color: 'var(--ink)' }}>
@@ -105,7 +105,7 @@ export default function App() {
       )}
       {screen === 'builder' && <Builder setScreen={setScreen} />}
       {screen === 'canvas' && <Canvas setScreen={setScreen} />}
-      {screen === 'run' && <RunView runId={selectedRunId} setScreen={setScreen} />}
+      {screen === 'run' && <LiveRunView />}
       {screen === 'gallery' && <Gallery setScreen={setScreen} />}
     </div>
   )
