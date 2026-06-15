@@ -42,14 +42,17 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
-    agent_config, agent_tasks, agents, execution_events, workflow_edges, workflow_nodes,
+    agent_config, agent_tasks, agents, approval_requests, execution_events, workflow_edges,
+    workflow_nodes, workflow_runs,
 )
 from app.domain.remittance.analyst import compose_analyst_task_input
+from app.services.event_service import get_event_service
 from app.services.message_bus import (
     AgentMessageDraft,
     MessageBusService,
@@ -82,7 +85,7 @@ _DEFAULT_FEEDBACK_CAP = 2  # BUILD_SPEC §9.3 default when neither edge nor agen
 class AdvanceResult:
     """Outcome of advancing the graph after a task completes. The worker maps
     each status to a run-state transition (see module docstring)."""
-    status: str  # next_task | completed | completed_forced | failed_no_match
+    status: str  # next_task | completed | completed_forced | failed_no_match | awaiting_approval
     next_task_id: str | None = None
     next_node_id: str | None = None
     next_agent_id: str | None = None
@@ -217,6 +220,44 @@ async def _dispatch_next(
         feedback_iteration_count=iteration if is_loop else 0,
     ))
 
+    if await _agent_requires_approval(db, next_node["agent_id"]):
+        agent_name = await _get_agent_name(db, next_node["agent_id"]) or "Agent"
+        description = f"Approve {agent_name} to proceed"
+        now = datetime.now(timezone.utc).isoformat()
+        await db.execute(insert(approval_requests).values(
+            id=str(uuid.uuid4()),
+            run_id=item.run_id,
+            task_id=next_task_id,
+            description=description,
+            status="pending",
+            created_at=now,
+        ))
+        await db.execute(
+            update(workflow_runs)
+            .where(workflow_runs.c.id == item.run_id)
+            .values(status="awaiting_approval")
+        )
+        await get_event_service().emit(
+            db,
+            run_id=item.run_id,
+            task_id=next_task_id,
+            agent_id=next_node["agent_id"],
+            event_type="approval_required",
+            data={
+                "run_id": item.run_id,
+                "task_id": next_task_id,
+                "agent_id": next_node["agent_id"],
+                "description": description,
+            },
+        )
+        await db.commit()
+        return AdvanceResult(
+            status="awaiting_approval",
+            next_task_id=next_task_id,
+            next_node_id=next_node["id"],
+            next_agent_id=next_node["agent_id"],
+        )
+
     if is_loop:
         # feedback_sent is committed atomically with the task + message below.
         await _emit_event(
@@ -335,14 +376,17 @@ async def _resolve_cap(db: AsyncSession, edge: dict) -> int:
     return int(val) if val is not None else _DEFAULT_FEEDBACK_CAP
 
 
+async def _agent_requires_approval(db: AsyncSession, agent_id: str) -> bool:
+    row = await db.execute(
+        select(agent_config.c.requires_approval).where(agent_config.c.agent_id == agent_id)
+    )
+    val = row.scalar_one_or_none()
+    return bool(val)
+
+
 async def _emit_event(
     db: AsyncSession, run_id: str, event_type: str, data: dict
 ) -> None:
     """Insert one execution_events row (uncommitted; committed by the caller's
     next commit). Graph events omit task_id/agent_id like other run-level events."""
-    await db.execute(insert(execution_events).values(
-        id=str(uuid.uuid4()),
-        run_id=run_id,
-        event_type=event_type,
-        data=json.dumps(data),
-    ))
+    await get_event_service().emit(db, run_id=run_id, event_type=event_type, data=data)

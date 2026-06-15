@@ -147,6 +147,8 @@ class WorkflowWorker:
 
         if advance.status == "next_task":
             return  # run stays 'running'; next task + message committed, item enqueued
+        if advance.status == "awaiting_approval":
+            return  # run paused; approval gate committed in graph layer
         if advance.status == "completed":
             await self._record_run_completed(db, item, result, forced=False)
         elif advance.status == "completed_forced":

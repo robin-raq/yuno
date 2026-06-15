@@ -8,6 +8,9 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.services.approval_service import (
+    ApprovalAlreadyResolved, ApprovalNotFound, approve_task, reject_task,
+)
 from app.services import workflow_service
 from app.services.workflow_service import (
     WorkflowNotFound, GraphValidationError, RunNotFound, list_run_events,
@@ -49,3 +52,23 @@ async def get_run_events(run_id: str, db: AsyncSession = Depends(get_db)):
         return await list_run_events(db, run_id)
     except RunNotFound:
         raise HTTPException(404, detail={"error": "run_not_found", "message": f"Run {run_id} not found"})
+
+
+@router.post("/runs/{run_id}/tasks/{task_id}/approve")
+async def approve_run_task(run_id: str, task_id: str, db: AsyncSession = Depends(get_db)):
+    try:
+        return await approve_task(db, run_id, task_id)
+    except ApprovalNotFound:
+        raise HTTPException(404, detail={"error": "approval_not_found", "message": "No pending approval for this task"})
+    except ApprovalAlreadyResolved:
+        raise HTTPException(409, detail={"error": "approval_already_resolved", "message": "Approval already resolved"})
+
+
+@router.post("/runs/{run_id}/tasks/{task_id}/reject")
+async def reject_run_task(run_id: str, task_id: str, db: AsyncSession = Depends(get_db)):
+    try:
+        return await reject_task(db, run_id, task_id)
+    except ApprovalNotFound:
+        raise HTTPException(404, detail={"error": "approval_not_found", "message": "No pending approval for this task"})
+    except ApprovalAlreadyResolved:
+        raise HTTPException(409, detail={"error": "approval_already_resolved", "message": "Approval already resolved"})
