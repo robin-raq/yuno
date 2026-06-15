@@ -19,6 +19,7 @@ Coverage:
   W12 Unit 3 compat: start_run does NOT auto-execute (queue stays empty)
   W13 Unit 4 compat: MessageBusService tests are unaffected (bus unused here)
   W14 Compliance agent routes through scripted ComplianceAdapter (U6)
+  W15 Analyst agent routes through scripted AnalystAdapter
 """
 import asyncio
 import json
@@ -31,6 +32,8 @@ import pytest_asyncio
 from sqlalchemy import delete, insert, select, text
 
 from app.adapters.base import TaskInput, TaskResult
+from app.domain.remittance.analyst import compose_analyst_task_input
+from app.domain.remittance.compliance import format_output, screen_from_dict
 from app.domain.remittance.research import assemble_brief
 from app.models import agent_config, agents, agent_tasks, execution_events, workflow_nodes, workflow_runs, workflows
 from app.services.message_bus import (
@@ -580,5 +583,96 @@ async def test_compliance_agent_uses_scripted_adapter(db, compliance_seed):
     assert task["output"].startswith("COMPLIANCE=CLEARED")
     run = (
         await db.execute(select(workflow_runs).where(workflow_runs.c.id == compliance_seed["run_id"]))
+    ).mappings().one()
+    assert run["status"] == "completed"
+
+
+@pytest_asyncio.fixture
+async def analyst_seed(db):
+    """Analyst agent on a terminal node — for scripted-adapter routing."""
+    agent_id = str(uuid.uuid4())
+    workflow_id = str(uuid.uuid4())
+    node_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    task_id = str(uuid.uuid4())
+    brief_json = _compliance_brief_json()
+    compliance_output = format_output(
+        screen_from_dict(json.loads(brief_json), rules_path=_COMPLIANCE_FIXTURE.parent / "compliance_rules.json")
+    )
+    analyst_input = compose_analyst_task_input(brief_json, compliance_output)
+
+    await db.execute(insert(agents).values(
+        id=agent_id, name="Analyst", role="analyst",
+        system_prompt="Score providers and recommend.", model="claude-haiku-4-5-20251001",
+        status="active",
+    ))
+    await db.execute(insert(agent_config).values(
+        id=str(uuid.uuid4()), agent_id=agent_id,
+        extensions='["developer"]', requires_approval=0,
+        max_tokens_per_run=50000, max_runs_per_minute=6,
+        blocked_extensions="[]", max_feedback_iterations=2,
+        max_turns=5, timeout_seconds=60,
+    ))
+    await db.execute(insert(workflows).values(
+        id=workflow_id, name="Analyst Worker Test", description="",
+    ))
+    await db.execute(insert(workflow_nodes).values(
+        id=node_id, workflow_id=workflow_id, agent_id=agent_id,
+        node_type="end", task_prompt="Score providers and recommend.",
+        position_x=0, position_y=0,
+    ))
+    await db.execute(insert(workflow_runs).values(
+        id=run_id, workflow_id=workflow_id, status="pending",
+        forced_complete=0, started_at="2026-01-01T00:00:00+00:00",
+    ))
+    await db.execute(insert(agent_tasks).values(
+        id=task_id, run_id=run_id, node_id=node_id, agent_id=agent_id,
+        source="workflow", status="pending", input=analyst_input,
+    ))
+    await db.commit()
+
+    return {
+        "agent_id": agent_id,
+        "workflow_id": workflow_id,
+        "node_id": node_id,
+        "run_id": run_id,
+        "task_id": task_id,
+        "analyst_input": analyst_input,
+    }
+
+
+# ── W15: Analyst agent uses scripted adapter ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_analyst_agent_uses_scripted_adapter(db, analyst_seed, tmp_path, monkeypatch):
+    """Analyst node must invoke AnalystAdapter, not the injected FakeAdapter."""
+    monkeypatch.setattr(
+        "app.adapters.analyst_adapter._DEFAULT_REPORTS_DIR",
+        tmp_path / "reports",
+    )
+    fake = FakeAdapter()
+    worker = WorkflowWorker(
+        MessageBusService(InMemoryWorkflowQueue()),
+        adapter_cls=lambda **_: fake,
+    )
+    item = WorkflowDispatchItem(
+        run_id=analyst_seed["run_id"],
+        task_id=analyst_seed["task_id"],
+        agent_id=analyst_seed["agent_id"],
+        node_id=analyst_seed["node_id"],
+        input=analyst_seed["analyst_input"],
+    )
+
+    await worker.process_dispatch_item(db, item)
+
+    assert fake.invoke_count == 0
+    task = (
+        await db.execute(select(agent_tasks).where(agent_tasks.c.id == analyst_seed["task_id"]))
+    ).mappings().one()
+    assert task["status"] == "completed"
+    assert task["output"].startswith("ANALYST=RECOMMENDATION")
+    assert "MoneyGram" in task["output"]
+    run = (
+        await db.execute(select(workflow_runs).where(workflow_runs.c.id == analyst_seed["run_id"]))
     ).mappings().one()
     assert run["status"] == "completed"

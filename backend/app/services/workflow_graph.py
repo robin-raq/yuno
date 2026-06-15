@@ -47,8 +47,9 @@ from sqlalchemy import func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
-    agent_config, agent_tasks, execution_events, workflow_edges, workflow_nodes,
+    agent_config, agent_tasks, agents, execution_events, workflow_edges, workflow_nodes,
 )
+from app.domain.remittance.analyst import compose_analyst_task_input
 from app.services.message_bus import (
     AgentMessageDraft,
     MessageBusService,
@@ -193,8 +194,16 @@ async def _dispatch_next(
     if is_loop:
         next_input = compose_loop_back_input(next_node["task_prompt"], task_output)
     elif task_output:
-        # Forward handoff: prior agent output becomes the next task input (BUILD_SPEC §7.1).
-        next_input = task_output
+        next_agent_name = await _get_agent_name(db, next_node["agent_id"])
+        if next_agent_name == "Analyst":
+            research_output = await _get_latest_agent_output(db, item.run_id, "Research")
+            if research_output:
+                next_input = compose_analyst_task_input(research_output, task_output)
+            else:
+                next_input = task_output
+        else:
+            # Forward handoff: prior agent output becomes the next task input (BUILD_SPEC §7.1).
+            next_input = task_output
     else:
         next_input = next_node["task_prompt"]
     await db.execute(insert(agent_tasks).values(
@@ -255,6 +264,29 @@ async def _get_node(db: AsyncSession, node_id: str) -> dict | None:
     row = await db.execute(select(workflow_nodes).where(workflow_nodes.c.id == node_id))
     node = row.mappings().first()
     return dict(node) if node else None
+
+
+async def _get_agent_name(db: AsyncSession, agent_id: str) -> str | None:
+    row = await db.execute(select(agents.c.name).where(agents.c.id == agent_id))
+    return row.scalar_one_or_none()
+
+
+async def _get_latest_agent_output(
+    db: AsyncSession, run_id: str, agent_name: str
+) -> str | None:
+    row = await db.execute(
+        select(agent_tasks.c.output)
+        .join(agents, agents.c.id == agent_tasks.c.agent_id)
+        .where(
+            agent_tasks.c.run_id == run_id,
+            agents.c.name == agent_name,
+            agent_tasks.c.status == "completed",
+            agent_tasks.c.output.isnot(None),
+        )
+        .order_by(agent_tasks.c.completed_at.desc())
+        .limit(1)
+    )
+    return row.scalar_one_or_none()
 
 
 async def _get_edges_from(db: AsyncSession, from_node_id: str) -> list[dict]:

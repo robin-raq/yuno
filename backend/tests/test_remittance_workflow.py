@@ -14,13 +14,11 @@ import pytest_asyncio
 from sqlalchemy import select, text
 
 from app.adapters.base import TaskInput, TaskResult
-from app.domain.remittance.analyst import analyze, format_output
 from app.domain.remittance.research import assemble_brief
 from app.domain.remittance.types import (
     ROUTE_ANALYST_NEEDS_MORE_DATA,
     ROUTE_ANALYST_RECOMMENDATION,
     ROUTE_COMPLIANCE_CLEARED,
-    TransferBrief,
 )
 from app.models import agent_tasks, agents, execution_events, workflow_nodes, workflow_runs, workflows
 from app.services import workflow_service
@@ -63,6 +61,13 @@ def _brief_json_missing_flag() -> str:
     return json.dumps(data)
 
 
+def _brief_json_missing_rate() -> str:
+    """Valid for Compliance screening; Analyst returns NEEDS_MORE_DATA via missing_fields."""
+    data = json.loads(_brief_json())
+    data["missing_fields"] = ["moneygram.rate_cop"]
+    return json.dumps(data)
+
+
 def _recommendation_output() -> str:
     return (
         f"{ROUTE_ANALYST_RECOMMENDATION}\n"
@@ -92,10 +97,15 @@ def make_remittance_fake_adapter(
 
         async def invoke(self, task: TaskInput, on_event) -> TaskResult:
             content = task.task_content or ""
-            is_analyst = (
-                "Score providers" in content
-                or ROUTE_COMPLIANCE_CLEARED in content
-            )
+            is_analyst = False
+            try:
+                data = json.loads(content)
+                is_analyst = isinstance(data, dict) and "brief" in data and "compliance" in data
+            except json.JSONDecodeError:
+                is_analyst = (
+                    "Score providers" in content
+                    or ROUTE_COMPLIANCE_CLEARED in content
+                )
             if is_analyst:
                 if analyst_handler is not None:
                     return await analyst_handler(task, on_event)
@@ -235,12 +245,15 @@ async def test_flagged_sentinel_does_not_route_to_analyst(db):
 # ── NEEDS_MORE_DATA loop with targeted re-request (U12) ───────────────────────
 
 @pytest.mark.asyncio
-async def test_needs_more_data_loops_with_feedback_in_research_input(db):
+async def test_needs_more_data_loops_with_feedback_in_research_input(db, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.adapters.analyst_adapter._DEFAULT_REPORTS_DIR",
+        tmp_path / "reports",
+    )
     missing = "moneygram.rate_cop"
     run_id = await _run_remittance(
         db,
-        research_outputs=[_brief_json(), _brief_json()],
-        analyst_outputs=[_needs_more_data_output(missing), _recommendation_output()],
+        research_outputs=[_brief_json_missing_rate(), _brief_json()],
     )
     by_agent = await _tasks_by_agent(db, run_id)
     run = await _run_row(db, run_id)
@@ -249,6 +262,8 @@ async def test_needs_more_data_loops_with_feedback_in_research_input(db):
     looped_input = by_agent["Research"][1]["input"]
     assert missing in looped_input
     assert len(by_agent["Analyst"]) == 2
+    assert by_agent["Analyst"][0]["output"].startswith("ANALYST=NEEDS_MORE_DATA")
+    assert by_agent["Analyst"][1]["output"].startswith("ANALYST=RECOMMENDATION")
     assert run["status"] == "completed"
     assert run["forced_complete"] == 0
 
@@ -265,21 +280,24 @@ async def test_needs_more_data_loops_with_feedback_in_research_input(db):
 # ── Loop cap ──────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_needs_more_data_loop_caps_at_two(db):
+async def test_needs_more_data_loop_caps_at_two(db, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.adapters.analyst_adapter._DEFAULT_REPORTS_DIR",
+        tmp_path / "reports",
+    )
     run_id = await _run_remittance(
         db,
-        research_outputs=[_brief_json(), _brief_json(), _brief_json()],
-        analyst_outputs=[
-            _needs_more_data_output(),
-            _needs_more_data_output(),
-            _needs_more_data_output(),
-        ],
+        research_outputs=[_brief_json_missing_rate()] * 3,
     )
     by_agent = await _tasks_by_agent(db, run_id)
     run = await _run_row(db, run_id)
 
     assert len(by_agent["Research"]) == 3
     assert len(by_agent["Analyst"]) == 3
+    assert all(
+        t["output"].startswith("ANALYST=NEEDS_MORE_DATA")
+        for t in by_agent["Analyst"]
+    )
     assert run["status"] == "completed"
     assert run["forced_complete"] == 1
 
@@ -296,43 +314,50 @@ async def test_needs_more_data_loop_caps_at_two(db):
 # ── Recommended success ───────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_cleared_path_completes_with_recommendation(db):
-    run_id = await _run_remittance(
-        db,
-        research_outputs=[_brief_json()],
-        analyst_outputs=[_recommendation_output()],
+async def test_cleared_path_completes_with_recommendation(db, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.adapters.analyst_adapter._DEFAULT_REPORTS_DIR",
+        tmp_path / "reports",
     )
+    run_id = await _run_remittance(db, research_outputs=[_brief_json()])
     by_agent = await _tasks_by_agent(db, run_id)
     run = await _run_row(db, run_id)
 
     assert set(by_agent) == {"Research", "Compliance", "Analyst"}
     assert by_agent["Compliance"][0]["output"].startswith("COMPLIANCE=CLEARED")
     assert by_agent["Analyst"][0]["output"].startswith("ANALYST=RECOMMENDATION")
-    assert "RECOMMENDATION:" in by_agent["Analyst"][0]["output"]
+    assert "RECOMMENDATION: MoneyGram" in by_agent["Analyst"][0]["output"]
     assert run["status"] == "completed"
     assert run["forced_complete"] == 0
+    assert (tmp_path / "reports" / "transfer_comparison.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_analyst_receives_analyst_input_json(db):
+    """Compliance→Analyst forward handoff must pass AnalystInput JSON, not compliance prose."""
+    run_id = await _run_remittance(
+        db,
+        research_outputs=[_brief_json()],
+        analyst_outputs=[_recommendation_output()],
+    )
+    by_agent = await _tasks_by_agent(db, run_id)
+    payload = json.loads(by_agent["Analyst"][0]["input"])
+    research_brief = json.loads(by_agent["Research"][0]["output"])
+
+    assert payload["brief"]["amount_usd"] == research_brief["amount_usd"] == 500.0
+    assert payload["compliance"]["status"] == "CLEARED"
+    assert ROUTE_COMPLIANCE_CLEARED not in by_agent["Analyst"][0]["input"]
 
 
 # ── Real analyst output routing (anti-laundering guard F3) ────────────────────
 
 @pytest.mark.asyncio
-async def test_real_analyst_output_routes_to_completion_not_loop(db, tmp_path):
-    reports_dir = tmp_path / "reports"
-
-    async def _real_analyst(task: TaskInput, on_event) -> TaskResult:
-        brief = assemble_brief(
-            "send $500 cash to Bogotá",
-            memory_defaults=MEMORY_DEFAULTS,
-            fixture_path=FIXTURE_PATH,
-        )
-        result = analyze(brief, reports_dir=reports_dir)
-        return TaskResult(output=format_output(result))
-
-    run_id = await _run_remittance(
-        db,
-        research_outputs=[_brief_json()],
-        analyst_handler=_real_analyst,
+async def test_real_analyst_output_routes_to_completion_not_loop(db, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "app.adapters.analyst_adapter._DEFAULT_REPORTS_DIR",
+        tmp_path / "reports",
     )
+    run_id = await _run_remittance(db, research_outputs=[_brief_json()])
     by_agent = await _tasks_by_agent(db, run_id)
     run = await _run_row(db, run_id)
 
@@ -340,6 +365,7 @@ async def test_real_analyst_output_routes_to_completion_not_loop(db, tmp_path):
     output = by_agent["Analyst"][0]["output"]
     assert output.startswith("ANALYST=RECOMMENDATION")
     assert ROUTE_ANALYST_NEEDS_MORE_DATA not in output
+    assert "MoneyGram" in output
     assert run["status"] == "completed"
     assert run["forced_complete"] == 0
-    assert (reports_dir / "transfer_comparison.md").exists()
+    assert (tmp_path / "reports" / "transfer_comparison.md").exists()

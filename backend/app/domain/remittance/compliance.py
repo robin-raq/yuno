@@ -24,6 +24,9 @@ from app.domain.remittance.types import (
     ComplianceResult,
     TransferBrief,
     compliance_sentinel,
+    ROUTE_COMPLIANCE_CLEARED,
+    ROUTE_COMPLIANCE_FLAGGED,
+    ROUTE_COMPLIANCE_NEEDS_REVIEW,
 )
 
 
@@ -141,3 +144,19 @@ def format_output(result: ComplianceResult) -> str:
     else:
         body = " ".join(result.notes)
     return f"{sentinel}\n{body}" if body else sentinel
+
+
+def parse_adapter_output(text: str) -> ComplianceResult:
+    """Reverse ``format_output`` for Analyst handoff (note boundaries may be lossy)."""
+    lines = text.strip().splitlines()
+    if not lines:
+        raise ValueError("empty compliance output")
+    first = lines[0].strip()
+    body = "\n".join(lines[1:]).strip()
+    if first == ROUTE_COMPLIANCE_CLEARED:
+        return ComplianceResult(status="CLEARED", notes=[body] if body else [])
+    if first == ROUTE_COMPLIANCE_FLAGGED:
+        return ComplianceResult(status="FLAGGED", issue=body or "Transfer flagged.")
+    if first == ROUTE_COMPLIANCE_NEEDS_REVIEW:
+        return ComplianceResult(status="NEEDS_REVIEW", notes=[body] if body else [])
+    raise ValueError(f"unrecognized compliance sentinel: {first!r}")

@@ -5,10 +5,12 @@ No Goose, no DB, no worker.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from app.domain.remittance.compliance import parse_adapter_output
 from app.domain.remittance.scoring import pick_winner, provider_label, providers_for_brief, score_providers
-from app.domain.remittance.types import AnalystResult, ProviderQuote, TransferBrief
+from app.domain.remittance.types import AnalystInput, AnalystResult, ProviderQuote, TransferBrief
 
 _RATE_FIELDS = ("rate_cop", "cop_received")
 _REPORT_FILENAME = "transfer_comparison.md"
@@ -189,3 +191,10 @@ def analyze(
         telegram_message=_build_telegram_message(brief, winner_key, scores),
         report_path=_REPORT_RELATIVE,
     )
+
+
+def compose_analyst_task_input(brief_json: str, compliance_output: str) -> str:
+    """Build ``AnalystInput`` JSON for the scripted Analyst node after Compliance clears."""
+    brief = TransferBrief.from_dict(json.loads(brief_json))
+    compliance = parse_adapter_output(compliance_output)
+    return json.dumps(AnalystInput(brief=brief, compliance=compliance).to_dict())

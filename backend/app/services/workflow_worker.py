@@ -39,6 +39,7 @@ from sqlalchemy import insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.acp_goose import AcpGooseAdapter
+from app.adapters.analyst_adapter import AnalystAdapter
 from app.adapters.base import TaskInput, TaskResult
 from app.adapters.compliance_adapter import ComplianceAdapter
 from app.database import AsyncSessionLocal
@@ -54,6 +55,7 @@ log = logging.getLogger(__name__)
 
 SCRIPTED_AGENTS: dict[str, type["AgentRuntimeAdapter"]] = {
     "Compliance": ComplianceAdapter,
+    "Analyst": AnalystAdapter,
 }
 
 _DEFAULT_HOST = "127.0.0.1"
