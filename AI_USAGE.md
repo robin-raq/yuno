@@ -828,7 +828,7 @@ python3 -m pytest tests/ -q
   "account tier and corridor combination" — this logic belongs with NEEDS_REVIEW semantics
   and is deferred to U8.
 - **U5 ComplianceAdapter** — implemented; see entry below.
-- **U6 worker adapter selection** — not started.
+- **U6 worker adapter selection** — implemented; see U6 entry below.
 
 #### Review Tier Decision (U4)
 - **Classification: high-risk-lite.** U4 controls routing and fail-closed behavior for
@@ -848,7 +848,7 @@ python3 -m pytest tests/ -q
 
 ### Story: S2-REM — Remittance Comparison workflow (Phase B: U5 ComplianceAdapter)
 **Date:** 2026-06-14
-**Status:** [x] In Progress  [ ] Complete  [ ] Blocked
+**Status:** [ ] In Progress  [x] Complete  [ ] Blocked
 
 > Same gate limitation as Phase A/B: `make ai-usage-check` has no phase name for the
 > remittance plan's units, so this entry is maintained manually. Plan source:
@@ -962,8 +962,6 @@ python3 -m pytest tests/ -q
   raise `FileNotFoundError` if the rules file is absent; this is not in the except clause
   and would escape to the worker. For the demo the file is committed; deferred to production
   hardening.
-- **U6 worker adapter selection** — not started; the plan's `SCRIPTED_AGENTS` registry
-  and `_pick_adapter` routing go in the worker (U6 scope).
 
 #### Review Tier Decision (U5)
 - **Classification: high-risk-lite.** U5 is the adapter seam that the worker will call
@@ -979,6 +977,58 @@ python3 -m pytest tests/ -q
   wrapping the full parse+screen chain rather than splitting JSON parse from domain
   validation) as a reusable design decision for scripted adapters. Capture with U3–U4
   learnings at phase closeout.
+
+---
+
+### Story: S2-REM — Remittance Comparison workflow (Phase B: U6 worker adapter selection)
+**Date:** 2026-06-14
+**Status:** [ ] In Progress  [x] Complete  [ ] Blocked
+
+> Plan source: `docs/plans/2026-06-14-001-feat-remittance-comparison-workflow-plan.md` (U6).
+
+#### AI Tools and Models Used
+- Claude via Cursor — read worker + compliance adapter, TDD W14 test, `_pick_adapter` + `SCRIPTED_AGENTS`.
+
+#### Important Prompts and Key Decisions
+- Scoped to U6 only: worker adapter selection; no graph/seed/analyst changes.
+- `SCRIPTED_AGENTS = {"Compliance": ComplianceAdapter}` on `WorkflowWorker`.
+- `_pick_adapter(agent)` returns scripted class for registry hits; otherwise `adapter_cls`.
+- W14 proves `FakeAdapter.invoke_count == 0` for Compliance agent; output starts with `COMPLIANCE=CLEARED`.
+
+#### TDD Evidence (U6)
+- Added `test_compliance_agent_uses_scripted_adapter` (W14) with `compliance_seed` fixture.
+- Full suite: `pytest tests/ -q` → 173 passed, 1 skipped.
+
+#### Manual Review Performed
+- [x] No graph, seed, frontend, or analyst files touched.
+- [x] Non-scripted agents still use injected `adapter_cls` (W8 regression intact).
+
+---
+
+### Story: S2-REM — Remittance Comparison workflow (Phase B: U7 Analyst scoring + report)
+**Date:** 2026-06-14
+**Status:** [ ] In Progress  [x] Complete  [ ] Blocked
+
+> Plan source: `docs/plans/2026-06-14-001-feat-remittance-comparison-workflow-plan.md` (U7).
+
+#### AI Tools and Models Used
+- Claude via Cursor — test-first analyst/scoring per KTD5 (50/30/20 weights, digital location equalization).
+
+#### Important Prompts and Key Decisions
+- `scoring.py` — pure min-max normalization; `score_breakdown` exposed for digital equalization tests.
+- `analyst.py` — `analyze(brief, *, reports_dir, compliance_notes=None)`; NEEDS_MORE_DATA when gaps exist;
+  writes `transfer_comparison.md`; `format_output` for KTD6 sentinel + Telegram body.
+- Tie-break on equal weighted scores → higher `cop_received`.
+- Default fixture cash brief: MoneyGram wins on cop_received tie-break.
+
+#### TDD Evidence (U7)
+- 8 tests in `test_remittance_analyst.py`: WU winner scenario, digital equalization, tie-break,
+  NEEDS_MORE_DATA, report write, telegram shape.
+- Full suite: `pytest tests/ -q` → 173 passed, 1 skipped.
+
+#### Manual Review Performed
+- [x] No worker, graph, seed, adapter, or frontend files touched.
+- [x] Scoring split from I/O per plan.
 
 ---
 
